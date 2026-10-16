@@ -17,10 +17,14 @@ Eligible operations fail with `headless-runtime-unavailable` before installing
 an engine or starting an evaluator. Forks report **not-run**, not passed.
 Unknown counts are absent, not zero.
 
+Optional sticky PR reports can describe this blocked state without claiming an
+evaluation pass. They require an explicit reporting token and verified
+workflow serialization, described below.
+
 Independent tested modules provide exact/latest-stable engine metadata
-resolution, script-suppressed isolated installation and identity checks, matrix
-rendering, privacy-safe report projection, and owned-comment ordering decisions.
-The installer, matrix and comment policies are **not wired to native execution**.
+resolution, script-suppressed isolated installation and coherent job-local
+reuse, matrix rendering, and privacy-safe report projection.
+The installer and matrix are **not wired to native execution**.
 Synthetic tests of these modules are not native Vally qualification.
 
 ## Required integration before release
@@ -36,8 +40,6 @@ Until that artifact is delivered and tested, this Action deliberately cannot
 claim native suite validation, empty native selection handling, native
 `--require-pass` verdicts, execution authorization/freshness checks, cancellation
 evidence retention, prerequisite executor provisioning, or transcript upload.
-Sticky comment networking also remains blocked on a serialized reporting
-integration; ordering metadata alone is not an atomic concurrent update.
 
 Release acceptance requires model-free **real native** Linux controls for
 lint/plan/run, native fail verdicts even with successful process completion,
@@ -58,8 +60,9 @@ Passing this draft's CI does not satisfy those acceptance gates.
 | `model` | Explicit native model override. |
 | `runs`, `workers`, `timeout` | Positive integer native overrides; timeout is in seconds. |
 | `max-retries` | Nonnegative integer override, including explicit zero. |
-| `comment` | Default `false`. Currently emits an unavailable warning if requested. |
-| `report-id` | Stable unique identity within the job, including matrix axes; default `evals`. Letters, digits, `_`, `-`; 1-64 characters. |
+| `comment` | Default `false`. Opt in to a serialized, Action-owned PR report. |
+| `report-token` | No default. Explicit reporting-only GitHub App/bot token; the automatic `${{ github.token }}` is recommended. Needs `contents: read` and `pull-requests: write`. Human/PAT reporters are refused. |
+| `report-id` | Stable unique identity within the job; default `evals`. Letters, digits, `_`, `-`; 1-64 characters. Commenting requires a literal unique value and a non-matrix job. |
 | `upload-transcripts` | Default `false`. Currently emits an unavailable warning if requested. |
 | `artifact-retention-days` | 1-90, default 7; subject to repository retention policy. |
 
@@ -120,13 +123,53 @@ engine. Classic PATs are not supported. Hosted compatibility is not qualified
 in this draft; consult the
 [official CLI authentication guidance](https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/authenticate-copilot-cli).
 
-Reporting credentials must remain separate from evaluator subprocesses. There
-is currently **no PR token input or network comment implementation**. Artifact
-upload uses the runner's artifact-service credentials, not model credentials.
-The future optional comment integration must use least-privilege PR-write
-authorization, update only its authenticated author's exact report identity,
-serialize concurrent writers, and prevent older run/attempt replacement.
-Comment failure must warn without changing the native verdict.
+Reporting credentials remain separate from evaluator subprocesses. `report-token`
+has no implicit fallback to `GITHUB_TOKEN` or any model token. The Action masks
+the supplied token, removes its ambient input environment variable, and retains
+it only in the reporting client. Child processes use an environment allowlist
+that excludes both evaluator and reporting credentials. Artifact upload uses
+the runner's artifact-service credentials, not model credentials.
+
+## Optional sticky PR reporting
+
+Enable `comment: true` only in a reviewed, same-repository `pull_request` job.
+Supply `report-token: ${{ github.token }}` explicitly and grant that job
+`contents: read` plus `pull-requests: write`, not `write-all`. This does not grant
+model access or authorize an evaluation. Forks, invalid checkout contexts and
+non-PR events never initialize the comment client.
+
+The workflow must declare this **exact workflow-level concurrency policy**:
+
+```yaml
+concurrency:
+  group: evals-${{ github.workflow_ref }}
+  cancel-in-progress: false
+```
+
+The Action retrieves the workflow at `GITHUB_WORKFLOW_SHA` and verifies that
+policy before any comment write. This serializes workflow runs at GitHub rather
+than relying on a local runner lock or unsupported conditional comment writes.
+Within the workflow, parallel jobs have separate report identities.
+Each commenting step must use a unique literal `report-id` within its job and a
+literal `comment: true`. Matrix and reusable-workflow reporting jobs, dynamic
+report identities, aliases, and ambiguous duplicate steps are refused with a
+warning; use a non-matrix reporter or keep comments disabled for those jobs.
+The recognized Action references are `github/evals-action@...` and root `./`.
+
+The client resolves the authenticated bot identity, reads the complete comment
+collection, and creates once or edits the existing owned comment. Human
+comments are never edited, even if they copy the marker. Identity includes the
+repository, workflow path, job, selection hash and report ID. Stored run number
+and attempt prevent older reruns from overwriting newer results; the PR revision
+is refreshed immediately before writing. The comment links the exact revision,
+workflow run and structured artifact. Mutation failures are not retried because
+their completion may be ambiguous; response/readback mismatches are surfaced.
+
+Missing permissions, unsupported serialization, denied requests and other
+optional reporting failures produce visible annotations and summary warnings
+without changing the operation outcome. A missing native bundle remains an
+error even if its PR comment posts successfully. Networking is tested using
+synthetic GitHub responses; live bot-token comment qualification is not claimed.
 
 Default report JSON contains only operation status, categories, revision,
 identities and known counts. It is a reporting projection, not canonical saved
@@ -150,9 +193,17 @@ Registry SHA-512 identity must match the installed lockfile; package layout and
 the full dependency-tree hash are checked. A changed cache fails verification
 instead of downgrading. Registry integrity is **not publisher attestation**.
 
-The entry point does not yet call this module. Job-level installed-tool reuse,
-executor prerequisites, provenance qualification and wiring engine identities
-into the canonical runtime remain release gates. Do not cache project results,
+Installations are reused only within the caller's private job directory. A
+version/platform/architecture/Node identity lock serializes installation;
+receipts are published atomically only after verification. Every reuse rechecks
+the exact lockfile and complete installed dependency-tree hashes. Different
+exact pins coexist. Corrupt receipts, changed files and stale locks fail
+explicitly; the module does not reclaim a live lock or silently reinstall a
+different graph. No cross-job installation cache is restored.
+
+The entry point does not yet call this module. Executor prerequisites,
+provenance qualification and wiring engine identities into the canonical
+runtime remain release gates. Do not cache project results,
 secrets, home directories, or model configuration. No customer manifest is
 modified, no custom project dependencies are implicitly installed, and no
 product repository is cloned or built in a customer job.

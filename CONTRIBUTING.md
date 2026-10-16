@@ -23,6 +23,22 @@ verifies explicit failure, not native execution. Linux CI separately exercises
 the packaged Action under the hosted artifact service. Neither is native runtime
 qualification. No model credentials belong in CI or test fixtures.
 
+PR check names map directly to these commands:
+
+| Check | Command and purpose |
+| --- | --- |
+| Lint | `pnpm lint`: source/test lint rules. |
+| Type check | `pnpm typecheck`: strict TypeScript validation. |
+| Unit tests | `pnpm test:coverage`: input, policy, reporting, mocked GitHub, tool reuse and Action orchestration tests with coverage thresholds. |
+| Bundle verification | `pnpm check:package`: committed bundle freshness and a clean consumer-directory packaged entry-point test. |
+| Action smoke test | Executes `uses: ./` on Ubuntu, checks its explicit blocked/excluded outcome and real artifact upload. No models or native evaluations run. |
+
+Comment networking tests use synthetic GitHub responses, including serialized
+workflow guards, pagination, bot ownership, late runs/attempts, permission
+failures and readback. Installer tests use synthetic packages and exercise
+concurrent install/reuse and tampered files/receipts. They are not native
+runtime or live GitHub bot-token qualification.
+
 Commit `dist/index.cjs` and its generated license notices. This is an intentional
 JavaScript Action distribution exception: consumers execute committed `dist`
 without installing this repository. `pnpm check:dist` compares build bytes with
@@ -41,8 +57,8 @@ environment filtering is not an OS sandbox.
 This draft is not release-ready. Before proposing a release, integrate an
 immutable closed Runtime/Core bundle and record its actual version/checksum,
 verify supported selected-engine identities and native Linux model-free
-acceptance, wire native verdict/evidence handling, and finish serialized
-reporting and tool reuse. Include the runtime's notices in the distribution.
+acceptance, wire native verdict/evidence handling, and qualify the optional
+reporting client with the supported hosted token. Include the runtime's notices in the distribution.
 Run `pnpm check` from a clean checkout, review dependency provenance and the
 packaged delta, and document support and limitations.
 

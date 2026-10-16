@@ -1,11 +1,11 @@
 import { sha256 } from './tooling.js';
 
-export interface CommentIdentity { repository: string; workflow: string; job: string; report: string }
+export interface CommentIdentity { repository: string; workflow: string; job: string; report: string; selection?: string }
 export interface ReportOrder { runNumber: number; attempt: number }
 export interface Comment { id: number; authorId: number; body: string }
 
 export function commentMarker(identity: CommentIdentity): string {
-  return `<!-- evals-action:${sha256(JSON.stringify(identity))} -->`;
+  return `<!-- evals-action:${sha256(JSON.stringify([identity.repository, identity.workflow, identity.job, identity.report, identity.selection ?? '']))} -->`;
 }
 
 export function orderedBody(identity: CommentIdentity, order: ReportOrder, markdown: string): string {

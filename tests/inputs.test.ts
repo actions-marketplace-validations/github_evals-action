@@ -50,7 +50,8 @@ describe('public inputs', () => {
     const action = parse(await readFile('action.yml', 'utf8')) as { inputs: Record<string, unknown>; runs: { using: string; main: string } };
     const read = new Set<string>();
     parseInputs((key) => { read.add(key); return base[key] ?? ''; });
-    expect([...read].sort()).toEqual(Object.keys(action.inputs).sort());
+    // The reporting secret is consumed separately and never retained in the parsed input DTO.
+    expect([...read].sort()).toEqual(Object.keys(action.inputs).filter((key) => key !== 'report-token').sort());
     expect(action.runs).toEqual({ using: 'node24', main: 'dist/index.cjs' });
   });
 });

@@ -28,10 +28,12 @@ inputs:
   max-retries:
     description: Nonnegative integer native retry override.
   comment:
-    description: Request an optional sticky PR report (not yet integrated).
+    description: Opt in to a sticky PR report; requires report-token and verified workflow serialization.
     default: 'false'
+  report-token:
+    description: Explicit reporting-only GitHub token with contents read and pull-requests write. No default.
   report-id:
-    description: Stable unique identity within a job, including matrix axes if applicable.
+    description: Stable unique identity within a job. PR comments require a literal unique value and a non-matrix job.
     default: evals
   upload-transcripts:
     description: Opt in to sensitive detailed evidence (not yet integrated).

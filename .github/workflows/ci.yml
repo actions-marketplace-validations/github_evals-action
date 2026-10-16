@@ -11,7 +11,19 @@ concurrency:
   cancel-in-progress: true
 jobs:
   check:
-    name: Source and bundle
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Lint
+            command: lint
+          - name: Type check
+            command: typecheck
+          - name: Unit tests
+            command: test:coverage
+          - name: Bundle verification
+            command: check:package
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -23,10 +35,10 @@ jobs:
           node-version-file: .node-version
       - run: corepack enable
       - run: corepack pnpm install --frozen-lockfile --ignore-scripts
-      - run: corepack pnpm check
+      - run: corepack pnpm "${{ matrix.command }}"
       - run: git diff --exit-code
   packaged:
-    name: Packaged Action (fail-closed control, not native qualification)
+    name: Action smoke test
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
