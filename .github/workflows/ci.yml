@@ -1,0 +1,59 @@
+name: Model-free CI
+on:
+  pull_request:
+  push:
+    branches: [main, feat/ci-integration]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  check:
+    name: Source and bundle
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+      - run: corepack enable
+      - run: corepack pnpm install --frozen-lockfile --ignore-scripts
+      - run: corepack pnpm check
+      - run: git diff --exit-code
+  packaged:
+    name: Packaged Action (fail-closed control, not native qualification)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Exercise packaged entry point without model credentials
+        id: action
+        uses: ./
+        continue-on-error: true
+        with:
+          command: plan
+          working-directory: .
+          suite: synthetic-control
+          report-id: packaged-control
+      - name: Verify the blocked or excluded outcome
+        env:
+          OPERATION_OUTCOME: ${{ steps.action.outputs.outcome }}
+          STEP_OUTCOME: ${{ steps.action.outcome }}
+          ARTIFACT_ID: ${{ steps.action.outputs.artifact-id }}
+          PLAN_COMPLETENESS: ${{ steps.action.outputs.plan-completeness }}
+        run: |
+          test -n "$ARTIFACT_ID"
+          test "$PLAN_COMPLETENESS" = unknown
+          if [ "$OPERATION_OUTCOME" = not-run ]; then
+            test "$STEP_OUTCOME" = success
+          else
+            test "$OPERATION_OUTCOME" = error
+            test "$STEP_OUTCOME" = failure
+          fi
