@@ -1,0 +1,63 @@
+name: Evals
+description: Native evaluation CI integration (development preview; runtime integration blocked)
+author: GitHub
+inputs:
+  command:
+    description: Explicit operation - lint, plan, or run. Never defaults to run.
+    required: true
+  working-directory:
+    description: Project directory relative to the checked-out workspace.
+    required: true
+  suite:
+    description: Native named suite. Selection is resolved by the native runtime.
+  eval-paths:
+    description: Newline-separated native eval paths or patterns; spaces are preserved.
+  tags:
+    description: Newline-separated native tag selectors.
+  vally-version:
+    description: Latest stable or an exact stable semantic version.
+    default: latest
+  model:
+    description: Explicit native model override; omitted preserves configuration.
+  runs:
+    description: Positive integer native repetition override.
+  workers:
+    description: Positive integer native concurrency override.
+  timeout:
+    description: Positive integer native timeout override in seconds.
+  max-retries:
+    description: Nonnegative integer native retry override.
+  comment:
+    description: Opt in to a sticky PR report; requires report-token and verified workflow serialization.
+    default: 'false'
+  report-token:
+    description: Explicit reporting-only GitHub token with contents read and pull-requests write. No default.
+  report-id:
+    description: Stable unique identity within a job. PR comments require a literal unique value and a non-matrix job.
+    default: evals
+  upload-transcripts:
+    description: Opt in to sensitive detailed evidence (not yet integrated).
+    default: 'false'
+  artifact-retention-days:
+    description: Structured artifact retention in days, subject to repository policy.
+    default: '7'
+outputs:
+  outcome:
+    description: error or not-run in this development preview; never an evaluation pass.
+  plan-completeness:
+    description: unknown until a canonical runtime resolves the plan.
+  executed:
+    description: Known executed count; absent when unknown.
+  passed:
+    description: Known native pass count; absent when unknown.
+  failed:
+    description: Known native fail count; absent when unknown.
+  vally-version:
+    description: Concrete acquired engine version; absent until acquisition.
+  result-path:
+    description: Local minimal structured report path.
+  artifact-id:
+    description: Uploaded structured report artifact identifier.
+runs:
+  using: node24
+  main: dist/index.cjs
