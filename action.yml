@@ -1,21 +1,23 @@
 name: Evals
-description: Native evaluation CI integration (development preview; runtime integration blocked)
+description: Acquire Vally and run native lint or evaluations with structured GitHub reporting.
 author: GitHub
 inputs:
   command:
-    description: Explicit operation - lint, plan, or run. Never defaults to run.
-    required: true
+    description: Default all validates, lints, runs the selected evals, and updates one PR comment. Use lint, run, or report for separate jobs. Plan is unsupported.
+    default: all
+  github-token:
+    description: Automatic job token for Copilot and PR commenting in all mode, or commenting in report mode. The all job token has combined permissions; use separate commands for isolation.
+    default: ${{ github.token }}
   working-directory:
-    description: Project directory relative to the checked-out workspace.
-    required: true
+    description: Project directory relative to checkout. Required for all/lint/run; omitted for report.
   suite:
-    description: Native named suite. Selection is resolved by the native runtime.
+    description: Native named suite for run. Cannot combine with eval-paths or tags. Ignored for lint.
   eval-paths:
-    description: Newline-separated native eval paths or patterns; spaces are preserved.
+    description: Newline-separated literal eval file paths for run. No shell glob expansion. Ignored for lint.
   tags:
-    description: Newline-separated native tag selectors.
+    description: Newline-separated native tag selectors for run. Ignored for lint.
   vally-version:
-    description: Latest stable or an exact stable semantic version.
+    description: Default latest resolves the npm latest stable release once per job. Use an exact stable version to pin Vally. Native command and evidence contracts are verified at runtime.
     default: latest
   model:
     description: Explicit native model override; omitted preserves configuration.
@@ -27,37 +29,54 @@ inputs:
     description: Positive integer native timeout override in seconds.
   max-retries:
     description: Nonnegative integer native retry override.
-  comment:
-    description: Opt in to a sticky PR report; requires report-token and verified workflow serialization.
-    default: 'false'
+  credential-env:
+    description: Advanced run-only credential environment names for BYOK or supported secrets. Use copilot-token for the workflow token. Never reuse report-token.
+  copilot-token:
+    description: Explicit Copilot token for run, normally github.token with copilot-requests write. Mapped to COPILOT_GITHUB_TOKEN; cannot combine with that credential-env name or report-token.
   report-token:
-    description: Explicit reporting-only GitHub token with contents read and pull-requests write. No default.
+    description: Optional comment token override for all/report; defaults to github-token. Never pass it to explicit run jobs.
   report-id:
-    description: Stable unique identity within a job. PR comments require a literal unique value and a non-matrix job.
+    description: Stable report identity. Report jobs require a literal unique value and a non-matrix job.
     default: evals
+  source-artifact-id:
+    description: Positive structured-report artifact ID; report command downloads it directly.
+  source-artifact-digest:
+    description: SHA-256 digest returned when the structured report artifact was uploaded; report command only.
+  lint-artifact-id:
+    description: Optional companion lint artifact ID when reporting a run and lint together; report command only. Its report ID is the primary ID prefix plus -lint.
+  lint-artifact-digest:
+    description: SHA-256 digest for the optional companion lint artifact; report command only.
   upload-transcripts:
-    description: Opt in to sensitive detailed evidence (not yet integrated).
+    description: Opt in to native JSONL and stdout/stderr logs, which may contain sensitive content.
     default: 'false'
   artifact-retention-days:
     description: Structured artifact retention in days, subject to repository policy.
     default: '7'
 outputs:
   outcome:
-    description: error or not-run in this development preview; never an evaluation pass.
+    description: validated, passed, failed, error, cancelled, or not-run. Lint validation is not an evaluation pass.
   plan-completeness:
-    description: unknown until a canonical runtime resolves the plan.
+    description: Complete native terminal evidence, partial evidence, or unknown. No pre-execution plan is claimed.
   executed:
-    description: Known executed count; absent when unknown.
+    description: Number of executed native trial records, excluding skipped records; absent when unknown.
   passed:
-    description: Known native pass count; absent when unknown.
+    description: Number of executed native eval/variant/model groups with a passing native verdict; absent when unknown.
   failed:
-    description: Known native fail count; absent when unknown.
+    description: Number of executed native eval/variant/model groups with a failing native verdict; absent when unknown.
   vally-version:
     description: Concrete acquired engine version; absent until acquisition.
   result-path:
     description: Local minimal structured report path.
   artifact-id:
     description: Uploaded structured report artifact identifier.
+  artifact-digest:
+    description: SHA-256 digest of the uploaded structured report artifact.
+  lint-artifact-id:
+    description: Companion lint artifact identifier in all mode after successful lint.
+  lint-artifact-digest:
+    description: SHA-256 digest of the companion lint artifact in all mode.
+  native-diagnostics-path:
+    description: Local native output directory. Raw logs are uploaded only when upload-transcripts is true.
 runs:
   using: node24
   main: dist/index.cjs

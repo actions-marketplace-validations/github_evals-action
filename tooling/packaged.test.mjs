@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
-test('packaged Action rejects missing command from a clean consumer directory without dependencies', async () => {
+test('packaged Action rejects missing project configuration from a clean consumer directory without dependencies', async () => {
   const root = await mkdtemp(join(tmpdir(), 'evals-packaged-'));
   try {
     const entry = join(root, 'index.cjs');
@@ -24,7 +24,7 @@ test('packaged Action rejects missing command from a clean consumer directory wi
     });
     assert.equal(child.error, undefined);
     assert.equal(child.status, 1);
-    assert.match(child.stdout, /Invalid Action inputs/);
+    assert.match(child.stdout, /invalid-input-or-context/);
     assert.match(await readFile(summary, 'utf8'), /Evals: error/);
     assert.match(await readFile(output, 'utf8'), /outcome/);
     // Artifact service credentials are intentionally absent; this is a fail-closed packaging control.

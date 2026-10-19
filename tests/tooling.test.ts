@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { acquireEngine, dependencyDigest, inspectInstallation, releaseMetadata, resolveRelease, sha256, verifyCachedEngine, withInstallationLock } from '../src/tooling.js';
+import { acquireEngine, dependencyDigest, inspectInstallation, releaseMetadata, resolveRelease, verifyCachedEngine, withInstallationLock } from '../src/tooling.js';
 
 const integrity = `sha512-${Buffer.alloc(64, 1).toString('base64')}`;
 const release = { version: '0.19.0', integrity };
@@ -13,17 +13,19 @@ async function temporary(): Promise<string> {
 }
 afterEach(async () => { for (const path of directories.splice(0)) await rm(path, { recursive: true, force: true }); });
 
-async function fixture(root: string, selected = release): Promise<void> {
+async function fixture(root: string, selected = release, writeLock = true): Promise<void> {
   const path = join(root, 'node_modules', '@microsoft', 'vally-cli');
   await mkdir(join(path, 'dist'), { recursive: true });
   await writeFile(join(path, 'package.json'), JSON.stringify({ name: metadata.name, version: selected.version, bin: { vally: 'dist/index.js' } }));
   await writeFile(join(path, 'dist', 'index.js'), '// Synthetic fixture. Never executes Vally.');
-  await writeFile(join(root, 'package-lock.json'), JSON.stringify({
-    packages: {
-      '': { name: 'evals-action-toolchain' },
-      'node_modules/@microsoft/vally-cli': { ...selected, resolved: `https://registry.npmjs.org/@microsoft/vally-cli/-/vally-cli-${selected.version}.tgz` },
-    },
-  }));
+  if (writeLock) {
+    await writeFile(join(root, 'package-lock.json'), JSON.stringify({
+      packages: {
+        '': { name: 'evals-action-toolchain' },
+        'node_modules/@microsoft/vally-cli': { ...selected, resolved: `https://registry.npmjs.org/@microsoft/vally-cli/-/vally-cli-${selected.version}.tgz` },
+      },
+    }));
+  }
 }
 
 describe('isolated engine acquisition primitives', () => {
@@ -96,55 +98,103 @@ describe('isolated engine acquisition primitives', () => {
   it('uses exact isolated installation with no lifecycle scripts or inherited credentials', async () => {
     const root = await temporary();
     const install = vi.fn(async (args: string[], cwd: string, env: NodeJS.ProcessEnv) => {
+      expect(['install', 'ci']).toContain(args[0]);
+      if (args[0] === 'install') expect(args).toContain('--package-lock-only');
       expect(args).toContain('--ignore-scripts');
       expect(args).toContain('--userconfig');
       expect(args).toContain('--globalconfig');
       expect(args).toContain('https://registry.npmjs.org');
       expect(env).not.toHaveProperty('GITHUB_TOKEN');
       expect(env).not.toHaveProperty('COPILOT_GITHUB_TOKEN');
-      const manifest = JSON.parse(await readFile(join(cwd, 'package.json'), 'utf8')) as { dependencies: Record<string, string> };
+      const manifest = JSON.parse(await readFile(join(cwd, 'package.json'), 'utf8')) as { name: string; dependencies: Record<string, string> };
+      expect(manifest.name).toBe('evals-action-toolchain');
       expect(manifest.dependencies).toEqual({ '@microsoft/vally-cli': '0.19.0' });
-      await fixture(cwd);
+      await fixture(cwd, release, args[0] === 'install');
     });
     expect(await acquireEngine(release, root, install)).toMatchObject(release);
-    expect(install).toHaveBeenCalledTimes(1);
+    expect(install).toHaveBeenCalledTimes(2);
+    expect(install.mock.calls.map(([args]) => args[0])).toEqual(['install', 'ci']);
     expect(await acquireEngine(release, root, install)).toMatchObject(release);
-    expect(install).toHaveBeenCalledTimes(1);
+    expect(install).toHaveBeenCalledTimes(2);
     await expect(acquireEngine(release, await temporary(), async () => { throw new Error('install failed'); })).rejects.toThrow(/install failed/);
+  });
+  it('validates the generated graph before npm ci and rejects lock drift during installation', async () => {
+    const root = await temporary();
+    const invalid = vi.fn(async (_args: string[], cwd: string) => {
+      await fixture(cwd);
+      const path = join(cwd, 'package-lock.json');
+      const lock = JSON.parse(await readFile(path, 'utf8')) as { packages: Record<string, unknown> };
+      lock.packages['node_modules/untrusted'] = { resolved: 'https://other.example/package.tgz', integrity };
+      await writeFile(path, JSON.stringify(lock));
+    });
+    await expect(acquireEngine(release, root, invalid)).rejects.toThrow(/Non-registry/);
+    expect(invalid).toHaveBeenCalledTimes(1);
+    expect((await readdir(root)).filter((name) => /^[a-f0-9]{64}\.json$/.test(name))).toEqual([]);
+    const drift = vi.fn(async (args: string[], cwd: string) => {
+      await fixture(cwd, release, args[0] === 'install');
+      if (args[0] === 'ci') {
+        const path = join(cwd, 'package-lock.json');
+        await writeFile(path, `${await readFile(path, 'utf8')}\n`);
+      }
+    });
+    await expect(acquireEngine(release, await temporary(), drift)).rejects.toThrow(/lockfile differs/);
+  });
+  it('picks up a newer latest in a new job without changing the current job snapshot', async () => {
+    const firstJob = await temporary();
+    const secondJob = await temporary();
+    const fetcher = vi.fn(async () => metadata);
+    await resolveRelease('latest', firstJob, fetcher);
+    const nextMetadata = { ...metadata, version: '0.20.0' };
+    fetcher.mockResolvedValue(nextMetadata);
+    expect((await resolveRelease('latest', firstJob, fetcher)).version).toBe('0.19.0');
+    const next = await resolveRelease('latest', secondJob, fetcher);
+    expect(next.version).toBe('0.20.0');
+    const install = vi.fn(async (args: string[], cwd: string) => { await fixture(cwd, next, args[0] === 'install'); });
+    expect(await acquireEngine(next, secondJob, install)).toMatchObject(next);
+    expect(await acquireEngine(next, secondJob, install)).toMatchObject(next);
+    expect(install).toHaveBeenCalledTimes(2);
   });
   it('serializes concurrent installation and publishes only a complete coherent graph', async () => {
     const root = await temporary();
-    const install = vi.fn(async (_args: string[], cwd: string) => { await fixture(cwd); });
+    const install = vi.fn(async (args: string[], cwd: string) => { await fixture(cwd, release, args[0] === 'install'); });
     const [first, second] = await Promise.all([acquireEngine(release, root, install), acquireEngine(release, root, install)]);
     expect(first).toEqual(second);
-    expect(install).toHaveBeenCalledTimes(1);
+    expect(install).toHaveBeenCalledTimes(2);
     expect(first.lockSha256).toHaveLength(64);
     await writeFile(join(first.entry, '..', 'changed.js'), 'stale');
     await expect(acquireEngine(release, root, install)).rejects.toThrow(/changed/);
-    expect(install).toHaveBeenCalledTimes(1);
-  });
-  it('separates exact installed versions and never reuses changed lockfiles', async () => {
-    const root = await temporary();
-    const install = vi.fn(async (_args: string[], cwd: string) => {
-      const manifest = JSON.parse(await readFile(join(cwd, 'package.json'), 'utf8')) as { dependencies: Record<string, string> };
-      await fixture(cwd, { ...release, version: manifest.dependencies['@microsoft/vally-cli']! });
-    });
-    const first = await acquireEngine(release, root, install);
-    const olderRelease = { ...release, version: '0.18.0' };
-    const second = await acquireEngine(olderRelease, root, install);
-    expect(second.entry).not.toBe(first.entry);
-    expect(second.version).toBe('0.18.0');
-    expect(await acquireEngine(olderRelease, root, install)).toEqual(second);
     expect(install).toHaveBeenCalledTimes(2);
+  });
+  it('accepts new exact stable versions without Action updates and never reuses changed lockfiles', async () => {
+    const root = await temporary();
+    const install = vi.fn(async (args: string[], cwd: string) => { await fixture(cwd, release, args[0] === 'install'); });
+    const first = await acquireEngine(release, root, install);
+    const newRelease = { ...release, version: '0.20.0' };
+    const newInstall = vi.fn(async (args: string[], cwd: string) => { await fixture(cwd, newRelease, args[0] === 'install'); });
+    const next = await acquireEngine(newRelease, root, newInstall);
+    expect(next.version).toBe('0.20.0');
+    expect(next.entry).not.toBe(first.entry);
+    expect(install).toHaveBeenCalledTimes(2);
+    expect(newInstall).toHaveBeenCalledTimes(2);
     const lock = join(first.entry, '..', '..', '..', '..', '..', 'package-lock.json');
     await writeFile(lock, `${await readFile(lock, 'utf8')}\n`);
-    await expect(acquireEngine(release, root, install)).rejects.toThrow(/changed/);
-  });
+    await expect(acquireEngine(release, root, install)).rejects.toThrow(/lockfile differs/);
+  }, 20_000);
   it('refuses corrupt and escaping cache receipts', async () => {
     const root = await temporary();
-    const key = sha256(JSON.stringify([release, process.platform, process.arch, process.version]));
-    await writeFile(join(root, `${key}.json`), JSON.stringify({ directory: '../escape', engine: release }));
-    await expect(acquireEngine(release, root)).rejects.toThrow(/receipt/);
+    const install = vi.fn(async (args: string[], cwd: string) => { await fixture(cwd, release, args[0] === 'install'); });
+    await acquireEngine(release, root, install);
+    const receipt = (await readdir(root)).find((name) => /^[a-f0-9]{64}\.json$/.test(name))!;
+    const original = JSON.parse(await readFile(join(root, receipt), 'utf8')) as {
+      directory: string;
+      engine: Record<string, unknown>;
+    };
+    await writeFile(join(root, receipt), JSON.stringify({
+      ...original, engine: { ...original.engine, lockSha256: 'd'.repeat(64) },
+    }));
+    await expect(acquireEngine(release, root, install)).rejects.toThrow(/lockfile differs/);
+    await writeFile(join(root, receipt), JSON.stringify({ ...original, directory: '../escape' }));
+    await expect(acquireEngine(release, root, install)).rejects.toThrow(/receipt/);
   });
   it('does not steal a stale installation lock, and releases its own on failure', async () => {
     const root = await temporary();

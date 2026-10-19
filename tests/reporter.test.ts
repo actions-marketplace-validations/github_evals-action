@@ -6,25 +6,28 @@ import { type Report } from '../src/reporting.js';
 
 const context: CommentContext = {
   repository: 'o/r', workflowRef: 'o/r/.github/workflows/evals.yml@refs/pull/3/merge',
-  workflowSha: 'b'.repeat(40), job: 'evals', reportId: 'smoke', selection: 'selection-hash',
+  workflowSha: 'b'.repeat(40), job: 'evals', reportId: 'smoke', selection: 'c'.repeat(64),
   pullNumber: 3, runId: 1000, order: { runNumber: 10, attempt: 2 },
 };
 const report: Report = {
-  schemaVersion: 1, command: 'plan', outcome: 'error', completeness: 'unknown',
-  revision: 'a'.repeat(40), category: 'dependency', code: 'headless-runtime-unavailable',
+  schemaVersion: 2, reportId: 'smoke', repository: 'o/r', workflowRunId: 1000,
+  workflowRunAttempt: 2, sourceJob: 'evaluate', selection: context.selection,
+  command: 'run', outcome: 'error', completeness: 'unknown',
+  revision: 'a'.repeat(40), category: 'dependency', code: 'vally-acquisition-failed',
 };
-const source = `concurrency:
-  group: '${commentConcurrencyGroup}'
-  cancel-in-progress: false
-jobs:
+const source = `jobs:
   evals:
+    concurrency:
+      group: '${commentConcurrencyGroup}'
+      cancel-in-progress: false
     steps:
-      - uses: github/evals-action@${'c'.repeat(40)}
+      - uses: ./
         with:
-          comment: true
+          working-directory: evals
+          suite: smoke
           report-id: smoke
 `;
-const identity = { repository: context.repository, workflow: '.github/workflows/evals.yml', job: context.job, report: context.reportId, selection: context.selection };
+const identity = { repository: context.repository, workflow: '.github/workflows/evals.yml', job: 'report', report: context.reportId };
 const owned = (runNumber = 10, attempt = 1) => ({
   id: 20, user: { id: 42, type: 'Bot' }, body: orderedBody(identity, { runNumber, attempt }, 'prior report'),
 });
@@ -54,16 +57,14 @@ function fixture(options: {
       saved = { id: 20, user: { id: 42, type: 'Bot' }, body: String(body?.body) };
       return saved;
     }
-    if (method === 'GET' && path.endsWith('/issues/comments/20')) {
-      return options.badReadback ? { ...saved, body: 'wrong' } : saved;
-    }
+    if (method === 'GET' && path.endsWith('/issues/comments/20')) return options.badReadback ? { ...saved, body: 'wrong' } : saved;
     throw new Error(`Unexpected synthetic request ${method} ${path}`);
   });
   const writes = () => request.mock.calls.filter(([method, path]) => method !== 'GET' && path !== '/graphql');
   return { client: { request }, writes, request };
 }
 
-describe('serialized sticky GitHub networking', () => {
+describe('one sticky PR report for direct Action calls', () => {
   it('creates one owned comment, verifies readback, and links exact revision/run/artifact without claiming pass', async () => {
     const test = fixture();
     expect(await postReport(test.client, context, report, 123)).toBe('created');
@@ -72,20 +73,21 @@ describe('serialized sticky GitHub networking', () => {
     expect(method).toBe('POST');
     expect(path).toBe('/repos/o/r/issues/3/comments');
     expect(payload?.body).toContain('Evals: error');
-    expect(payload?.body).toContain('headless-runtime-unavailable');
+    expect(payload?.body).toContain('vally-acquisition-failed');
     expect(payload?.body).toContain(`/commit/${report.revision}`);
     expect(payload?.body).toContain('/actions/runs/1000/artifacts/123');
     expect(payload?.body).not.toContain('passed');
   });
-  it('updates in place, ignores human comments, and paginates the complete collection', async () => {
+  it('updates in place across selection changes and paginates without touching human comments', async () => {
     const human = { id: 9, user: { id: 99, type: 'User' }, body: owned().body };
     const test = fixture({ comments: [...Array.from({ length: 100 }, () => human), owned()] });
-    expect(await postReport(test.client, context, report)).toBe('updated');
+    expect(await postReport(test.client, { ...context, selection: 'new-selection' }, report)).toBe('updated');
     expect(test.writes()).toHaveLength(1);
     expect(test.writes()[0]?.slice(0, 2)).toEqual(['PATCH', '/repos/o/r/issues/comments/20']);
     expect(test.request.mock.calls.some(([, path]) => path.endsWith('page=2'))).toBe(true);
+    expect(String(test.writes()[0]?.[2]?.body)).not.toContain('/artifacts/undefined');
   });
-  it('does not overwrite a newer run or attempt and rejects duplicate owned comments', async () => {
+  it('does not overwrite newer runs or attempts and rejects duplicate owned comments', async () => {
     for (const existing of [owned(11, 1), owned(10, 3)]) {
       const test = fixture({ comments: [existing] });
       expect(await postReport(test.client, context, report)).toBe('stale');
@@ -95,17 +97,13 @@ describe('serialized sticky GitHub networking', () => {
     await expect(postReport(duplicate.client, context, report)).rejects.toThrow(/Duplicate/);
     expect(duplicate.writes()).toEqual([]);
   });
-  it('refuses human tokens and does not edit a user-authored matching marker', async () => {
-    const humanToken = fixture({ authorLogin: 'person' });
-    await expect(postReport(humanToken.client, context, report)).rejects.toThrow('reporting-bot-token-required');
-    expect(humanToken.writes()).toEqual([]);
-    const humanComment = fixture({ comments: [{ ...owned(), user: { id: 99, type: 'User' } }] });
-    expect(await postReport(humanComment.client, context, report)).toBe('created');
-  });
-  it('refreshes source eligibility immediately before mutation', async () => {
-    const test = fixture({ drift: true });
-    await expect(postReport(test.client, context, report)).rejects.toThrow('pull-request-source-is-stale-or-excluded');
-    expect(test.writes()).toEqual([]);
+  it('refuses human tokens and refreshes source eligibility before writing', async () => {
+    const human = fixture({ authorLogin: 'person' });
+    await expect(postReport(human.client, context, report)).rejects.toThrow('reporting-bot-token-required');
+    const stale = fixture({ drift: true });
+    await expect(postReport(stale.client, context, report)).rejects.toThrow('pull-request-source-is-stale-or-excluded');
+    expect(human.writes()).toEqual([]);
+    expect(stale.writes()).toEqual([]);
   });
   it('does not retry a denied write or repair a mismatched readback', async () => {
     const denied = fixture({ failWrite: true });
@@ -115,37 +113,79 @@ describe('serialized sticky GitHub networking', () => {
     await expect(postReport(mismatch.client, context, report)).rejects.toThrow('comment-readback-mismatch');
     expect(mismatch.writes()).toHaveLength(1);
   });
-  it('escapes malicious presentation text and separates selection and parallel job identities', async () => {
-    const test = fixture({ comments: [owned()] });
-    expect(await postReport(test.client, { ...context, selection: 'another-suite' }, {
-      ...report, code: '<script>@person\n[link](https://evil.test)',
-    })).toBe('created');
-    expect(test.writes()[0]?.[2]?.body).not.toContain('<script>');
-    expect(test.writes()[0]?.[2]?.body).not.toContain('@person');
-    expect(orderedBody({ ...identity, job: 'parallel' }, context.order, '')).not.toBe(orderedBody(identity, context.order, ''));
+  it('renders suite, names, and both statuses in one comment and updates it for lint-only', async () => {
+    const test = fixture();
+    const evaluation: Report = {
+      ...report, suite: 'selected-suite @team', outcome: 'passed', executed: 1,
+      passed: 1, failed: 0, groups: [{
+        identity: 'a'.repeat(64), name: 'named-eval | @team', passed: true,
+        trials: 1, stimuliRun: 1, stimuliTotal: 1, skipped: 0,
+      }],
+    };
+    const lint: Report = { ...report, sourceJob: 'lint', reportId: 'smoke-lint', command: 'lint', outcome: 'validated', executed: 0 };
+    expect(await postReport(test.client, context, evaluation, 123, { report: lint, artifactId: 124 })).toBe('created');
+    const body = String(test.writes()[0]?.[2]?.body);
+    expect(test.writes()).toHaveLength(1);
+    expect(body).toContain('/artifacts/124');
+    expect(body).toContain('Suite:** selected-suite &#64;team');
+    expect(body).toContain('named-eval \\| &#64;team');
+    expect(body).toContain('Lint:** validated');
+    expect(body).toContain('Run:** passed - 1 trial');
+    expect(body).not.toContain('a'.repeat(64));
+    const update = fixture({ comments: [{ ...owned(), body }] });
+    expect(await postReport(update.client, context, lint, 124)).toBe('updated');
+    expect(update.writes()[0]?.[0]).toBe('PATCH');
+    expect(update.writes()[0]?.[2]?.body).not.toContain('**Run:**');
+  });
+  it('reports failed evaluations and lint failures accurately', async () => {
+    const test = fixture();
+    const failure: Report = { ...report, outcome: 'failed', executed: 1, failed: 1, passed: 0 };
+    const lint: Report = { ...report, reportId: 'smoke-lint', command: 'lint', outcome: 'validated', executed: 0 };
+    await postReport(test.client, context, failure, 123, { report: lint, artifactId: 124 });
+    expect(test.writes()[0]?.[2]?.body).toContain('# Evals: failed');
+    expect(test.writes()[0]?.[2]?.body).toContain('Lint:** validated');
+    const lintFailure = fixture();
+    await postReport(lintFailure.client, context, { ...lint, outcome: 'error', code: 'native-lint-failed' }, 124);
+    expect(lintFailure.writes()[0]?.[2]?.body).toContain('Lint:** error - native-lint-failed');
+    expect(lintFailure.writes()[0]?.[2]?.body).not.toContain('**Run:**');
+  });
+  it('rejects mismatched companion evidence before contacting GitHub', async () => {
+    const test = fixture();
+    await expect(postReport(test.client, context, report, 123, {
+      report: { ...report, reportId: 'smoke-lint', command: 'lint', revision: 'f'.repeat(40) }, artifactId: 124,
+    })).rejects.toThrow('inconsistent-report-evidence');
+    expect(test.request).not.toHaveBeenCalled();
   });
 });
 
-describe('verified workflow serialization guard', () => {
-  it('accepts the exact non-cancelling workflow group and distinct literal report steps', () => {
-    assertSerializedReporter(source, context);
-    assertSerializedReporter(source + '      - uses: github/evals-action@abc\n        with:\n          comment: true\n          report-id: other\n', context);
+describe('direct workflow source validation', () => {
+  it.each(['', '          command: all\n', '          command: report\n'])('accepts default, all, and report steps', (command) => {
+    assertSerializedReporter(source.replace('          report-id:', `${command}          report-id:`), context);
+  });
+  it('normalizes isolated report suffixes to the same comment identity', () => {
+    assertSerializedReporter(source.replace('report-id: smoke', 'command: report\n          report-id: smoke-run'), context);
+  });
+  it('allows distinct lint/run report steps sharing one serialized identity', () => {
+    const pair = source.replace('report-id: smoke', 'command: report\n          report-id: smoke-run') +
+      '      - uses: github/evals-action@abc\n        with:\n          command: report\n          report-id: smoke-lint\n';
+    assertSerializedReporter(pair, context);
+    expect(() => assertSerializedReporter(pair.replace('report-id: smoke-lint', 'report-id: smoke-run'), context)).toThrow();
   });
   it.each([
     source.replace('cancel-in-progress: false', 'cancel-in-progress: true'),
     source.replace(commentConcurrencyGroup, 'unrelated'),
     source.replace('steps:', 'strategy: {matrix: {os: [linux, windows]}}\n    steps:'),
     source.replace('report-id: smoke', "report-id: '${{ matrix.os }}'"),
-    source.replace('comment: true', "comment: '${{ always() }}'"),
-    source + '      - uses: github/evals-action@abc\n        with:\n          comment: true\n          report-id: smoke\n',
+    source + '      - uses: github/evals-action@abc\n        with:\n          command: report\n          report-id: smoke\n',
     source.replace('report-id: smoke', 'report-id: missing'),
+    source.replace('report-id: smoke', 'command: lint\n          report-id: smoke'),
     'invalid: [',
-  ])('refuses unsafe or ambiguous workflow topology without any write', async (workflow) => {
+  ])('refuses unsafe or ambiguous topology without writes', async (workflow) => {
     const test = fixture({ source: workflow });
     await expect(postReport(test.client, context, report)).rejects.toThrow();
     expect(test.writes()).toEqual([]);
   });
-  it('rejects wrong repository/ref/revision/run identities before mutation', async () => {
+  it('rejects wrong repository/ref/revision/run identities', async () => {
     for (const changed of [
       { repository: '../bad' }, { workflowSha: 'main' }, { workflowRef: 'other/r/.github/workflows/evals.yml@refs/pull/3/merge' },
       { workflowRef: 'o/r/.github/workflows/evals.yml@refs/pull/4/merge' }, { runId: 0 }, { pullNumber: -1 },
