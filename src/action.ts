@@ -11,6 +11,7 @@ import { parseStructuredReport, renderSummary, structuredReport, type Report } f
 import { githubClient, ReportingError, takeReportToken, takeSecretInput } from './github.js';
 import { postReport } from './reporter.js';
 import { acquireEngine, resolveRelease, sha256 } from './tooling.js';
+import { discoverReportArtifacts, reportArtifactName, type ReportArtifact } from './artifacts.js';
 
 const execute = promisify(execFile);
 type Evidence = { report: Report; artifactId: number };
@@ -67,18 +68,41 @@ export async function runAction(): Promise<void> {
         throw new NativeError('report-command-does-not-accept-execution-inputs', 'configuration');
       }
       if (pullNumber === undefined) throw new NativeError('report-command-requires-pull-request', 'policy');
-      if (inputs.sourceArtifactId === undefined || !inputs.sourceArtifactDigest) {
-        throw new NativeError('source-artifact-identity-required', 'configuration');
+      let primary: { id: number; digest: string; reportId: string | readonly string[]; command?: 'lint' | 'run' };
+      let discoveredLint: ReportArtifact | undefined;
+      if (inputs.sourceArtifactId !== undefined && inputs.sourceArtifactDigest) {
+        primary = { id: inputs.sourceArtifactId, digest: inputs.sourceArtifactDigest, reportId: inputs.reportId };
+      } else {
+        const discovered = await discoverReportArtifacts(githubClient(githubToken || reportToken, requiredEnv('RUNNER_TEMP')), {
+          repository: requiredEnv('GITHUB_REPOSITORY'), runId: positiveEnv('GITHUB_RUN_ID'),
+          attempt: positiveEnv('GITHUB_RUN_ATTEMPT'), reportId: inputs.reportId,
+        }, inputs.lintArtifactId === undefined);
+        const lint = inputs.lintArtifactId !== undefined && inputs.lintArtifactDigest
+          ? { id: inputs.lintArtifactId, digest: inputs.lintArtifactDigest }
+          : discovered.lint;
+        if (discovered.run) {
+          primary = discovered.run;
+          discoveredLint = discovered.lint;
+        } else if (lint) {
+          primary = { ...lint, reportId: [inputs.reportId, `${reportPrefix(inputs.reportId)}-lint`], command: 'lint' };
+          core.warning('No run artifact was found for this attempt. Reporting lint only; this is not an evaluation pass.');
+        } else throw new NativeError('report-artifacts-not-found', 'evidence');
       }
-      const imported = await readReportArtifact(inputs.sourceArtifactId, inputs.sourceArtifactDigest, inputs.reportId);
-      if (inputs.lintArtifactId !== undefined) {
+      const imported = await readReportArtifact(primary.id, primary.digest, primary.reportId, primary.command);
+      if (inputs.lintArtifactId !== undefined && primary.command !== 'lint') {
         if (!inputs.lintArtifactDigest) throw new NativeError('lint-artifact-identity-required', 'configuration');
         companion = {
-          report: await readReportArtifact(inputs.lintArtifactId, inputs.lintArtifactDigest, `${reportPrefix(inputs.reportId)}-lint`),
+          report: await readReportArtifact(inputs.lintArtifactId, inputs.lintArtifactDigest,
+            [inputs.reportId, reportPrefix(inputs.reportId), `${reportPrefix(inputs.reportId)}-lint`], 'lint'),
           artifactId: inputs.lintArtifactId,
         };
+      } else if (discoveredLint) {
+        companion = {
+          report: await readReportArtifact(discoveredLint.id, discoveredLint.digest, discoveredLint.reportId, 'lint'),
+          artifactId: discoveredLint.id,
+        };
       }
-      await commentReport(imported, reportToken || githubToken, pullNumber, inputs.sourceArtifactId, companion);
+      await commentReport(imported, reportToken || githubToken, pullNumber, primary.id, companion);
       publishOutputs(imported);
       await core.summary.addRaw(renderSummary(imported)).write();
       return;
@@ -156,6 +180,7 @@ export async function runAction(): Promise<void> {
   } catch (error) {
     report.outcome = 'error';
     if (error instanceof NativeError) { report.category = error.category; report.code = error.code; }
+    else if (error instanceof ReportingError) { report.category = 'evidence'; report.code = error.code; }
   }
 
   if (['error', 'failed', 'cancelled'].includes(report.outcome)) {
@@ -228,7 +253,7 @@ async function uploadReport(report: Report, retentionDays: number): Promise<{ id
   let artifact;
   try {
     artifact = await new DefaultArtifactClient().uploadArtifact(
-      `evals-${report.reportId}-${process.env.GITHUB_RUN_ATTEMPT ?? '1'}-${directory.slice(-6)}`,
+      reportArtifactName(report.reportId, report.command, report.workflowRunAttempt, directory.slice(-6)),
       [path], directory, { retentionDays },
     );
   } catch {
@@ -238,7 +263,9 @@ async function uploadReport(report: Report, retentionDays: number): Promise<{ id
   return { id: artifact.id, digest: artifact.digest, path };
 }
 
-async function readReportArtifact(artifactId: number, digest: string, reportId: string): Promise<Report> {
+async function readReportArtifact(
+  artifactId: number, digest: string, reportId: string | readonly string[], command?: 'lint' | 'run',
+): Promise<Report> {
   const directory = await mkdtemp(join(requiredEnv('RUNNER_TEMP'), 'evals-report-download-'));
   try {
     const download = await new DefaultArtifactClient().downloadArtifact(artifactId, { path: directory, expectedHash: `sha256:${digest}` });
@@ -246,10 +273,12 @@ async function readReportArtifact(artifactId: number, digest: string, reportId: 
     const entries = await readdir(directory);
     if (entries.length !== 1 || entries[0] !== 'report.json') throw new NativeError('source-artifact-content-invalid', 'evidence');
     const path = await containedFile(directory, 'report.json', 1024 * 1024);
-    return parseStructuredReport(await readFile(path, 'utf8'), {
+    const report = parseStructuredReport(await readFile(path, 'utf8'), {
       reportId, repository: requiredEnv('GITHUB_REPOSITORY'), workflowRunId: positiveEnv('GITHUB_RUN_ID'),
       workflowRunAttempt: positiveEnv('GITHUB_RUN_ATTEMPT'), revision: requiredEnv('GITHUB_SHA'),
     });
+    if (command !== undefined && report.command !== command) throw new NativeError('source-artifact-command-mismatch', 'evidence');
+    return report;
   } finally { await rm(directory, { recursive: true, force: true }); }
 }
 

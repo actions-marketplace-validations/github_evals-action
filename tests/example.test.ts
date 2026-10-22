@@ -10,6 +10,38 @@ import { assertSerializedReporter } from '../src/reporter.js';
 const execute = promisify(execFile);
 
 describe('real Copilot example contract', () => {
+  it('documents separate jobs with one automatic reporter and no artifact wiring', async () => {
+    const readme = await readFile('README.md', 'utf8');
+    const source = [...readme.matchAll(/```yaml\n([\s\S]*?)```/g)].map((match) => match[1]!)
+      .find((yaml) => yaml.includes('\n  lint:'))!;
+    const workflow = parse(source) as {
+      jobs: Record<string, {
+        needs?: string | string[]; if?: string; outputs?: unknown;
+        permissions: Record<string, string>; concurrency?: unknown;
+        steps: Array<{ uses: string; id?: string; with: Record<string, unknown> }>;
+      }>;
+    };
+    expect(Object.keys(workflow.jobs)).toEqual(['lint', 'run', 'report']);
+    const { lint, run, report } = workflow.jobs;
+    expect(run!.needs).toBe('lint');
+    expect(report!.needs).toEqual(['lint', 'run']);
+    expect(report!.if).toContain('always()');
+    expect(report!.if).toContain('head.repo.full_name == github.repository');
+    expect(report!.permissions).toEqual({ actions: 'read', contents: 'read', 'pull-requests': 'write' });
+    expect(report!.steps).toEqual([{ uses: 'github/evals-action@v0', with: { command: 'report' } }]);
+    for (const job of [lint!, run!]) {
+      expect(job.outputs).toBeUndefined();
+      expect(job.concurrency).toBeUndefined();
+      expect(job.permissions['pull-requests']).toBeUndefined();
+      expect(job.steps.every((step) => step.id === undefined && step.with['report-id'] === undefined)).toBe(true);
+    }
+    assertSerializedReporter(source, {
+      repository: 'o/r', workflowRef: 'o/r/.github/workflows/evals-ci.yml@refs/pull/3/merge',
+      workflowSha: 'b'.repeat(40), job: 'report', reportId: 'evals', selection: 'c'.repeat(64),
+      pullNumber: 3, runId: 1000, order: { runNumber: 10, attempt: 2 },
+    });
+  });
+
   it('is native-lint clean without evaluator credentials', async () => {
     const manifest = createRequire(import.meta.url).resolve('@microsoft/vally-cli/package.json');
     const entry = join(dirname(manifest), 'dist', 'index.js');

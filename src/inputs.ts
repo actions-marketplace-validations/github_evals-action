@@ -77,8 +77,8 @@ export function parseInputs(read: InputReader): Inputs {
   if ((lintArtifactId !== undefined) !== Boolean(lintArtifactDigest)) {
     throw new Error('Inputs lint-artifact-id and lint-artifact-digest must be provided together.');
   }
-  if (command === 'report' && (!sourceArtifactId || !sourceArtifactDigest)) {
-    throw new Error('Inputs source-artifact-id and source-artifact-digest are required for report.');
+  if ((sourceArtifactId !== undefined) !== Boolean(sourceArtifactDigest)) {
+    throw new Error('Inputs source-artifact-id and source-artifact-digest must be provided together.');
   }
   if (command !== 'report' && (sourceArtifactId !== undefined || sourceArtifactDigest ||
       lintArtifactId !== undefined || lintArtifactDigest)) {

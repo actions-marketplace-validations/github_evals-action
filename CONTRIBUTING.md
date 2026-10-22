@@ -48,6 +48,12 @@ PR-write permissions in one job, just like the simplest consumer setup.
 Default mode validates, lints, runs only after successful lint, and updates one
 sticky comment containing suite, native eval names, and lint/run statuses.
 Unit tests also cover explicit commands for users who choose isolated jobs.
+Report discovery must remain scoped to the current workflow run and attempt,
+match the shared report identity and command, and verify the API-provided
+digest and downloaded report identity. Refuse ambiguous or missing evidence;
+never choose the newest match or reuse a prior attempt. Preserve explicit
+ID/digest pairs as a discovery-free path. Discovery tests use synthetic
+artifact listings; do not require live tokens or model execution.
 
 Commit `dist/index.cjs` and its generated license notices. This is an intentional
 JavaScript Action distribution exception: consumers execute committed `dist`

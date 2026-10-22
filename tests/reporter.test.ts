@@ -156,6 +156,20 @@ describe('one sticky PR report for direct Action calls', () => {
     })).rejects.toThrow('inconsistent-report-evidence');
     expect(test.request).not.toHaveBeenCalled();
   });
+  it('accepts the same report identity for separate lint/run jobs but still requires successful lint', async () => {
+    const lint: Report = { ...report, command: 'lint', outcome: 'validated', executed: 0 };
+    const test = fixture();
+    expect(await postReport(test.client, context, report, 123, { report: lint, artifactId: 124 })).toBe('created');
+    expect(test.writes()[0]?.[2]?.body).toContain('Lint:** validated');
+    for (const changed of [
+      { reportId: 'other' }, { outcome: 'error' as const }, { command: 'run' }, { workflowRunAttempt: 1 },
+    ]) {
+      const invalid = fixture();
+      await expect(postReport(invalid.client, context, report, 123, { report: { ...lint, ...changed }, artifactId: 124 }))
+        .rejects.toThrow('inconsistent-report-evidence');
+      expect(invalid.request).not.toHaveBeenCalled();
+    }
+  });
 });
 
 describe('direct workflow source validation', () => {
