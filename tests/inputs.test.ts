@@ -48,7 +48,7 @@ describe('public inputs', () => {
     expect(parseValues({ 'upload-transcripts': 'true', 'vally-version': '0.19.0' }))
       .toMatchObject({ uploadTranscripts: true, vallyVersion: '0.19.0' });
   });
-  it('requires report inputs without requiring execution inputs', () => {
+  it('defaults to artifact discovery and accepts paired overrides without execution inputs', () => {
     expect(parseValues({
       command: 'report', 'working-directory': '', suite: '',
       'source-artifact-id': '123', 'source-artifact-digest': 'a'.repeat(64),
@@ -56,7 +56,17 @@ describe('public inputs', () => {
       command: 'report', workingDirectory: '', sourceArtifactId: 123,
       sourceArtifactDigest: 'a'.repeat(64),
     });
-    expect(() => parseValues({ command: 'report', 'working-directory': '', suite: '' })).toThrow(/source-artifact/);
+    expect(parseValues({ command: 'report', 'working-directory': '', suite: '' })).toMatchObject({
+      command: 'report', reportId: 'evals',
+    });
+    for (const extra of [
+      { 'source-artifact-id': '123' },
+      { 'source-artifact-digest': 'a'.repeat(64) },
+    ]) expect(() => parseValues({ command: 'report', 'working-directory': '', suite: '', ...extra })).toThrow(/provided together/);
+    expect(parseValues({
+      command: 'report', 'working-directory': '', suite: '',
+      'lint-artifact-id': '124', 'lint-artifact-digest': 'b'.repeat(64),
+    })).toMatchObject({ lintArtifactId: 124, lintArtifactDigest: 'b'.repeat(64) });
     expect(() => parseValues({
       command: 'report', 'working-directory': '', suite: '',
       'source-artifact-id': '0', 'source-artifact-digest': 'a'.repeat(64),

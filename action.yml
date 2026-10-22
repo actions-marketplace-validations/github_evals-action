@@ -6,7 +6,7 @@ inputs:
     description: Default all validates, lints, runs the selected evals, and updates one PR comment. Use lint, run, or report for separate jobs. Plan is unsupported.
     default: all
   github-token:
-    description: Automatic job token for Copilot and PR commenting in all mode, or commenting in report mode. The all job token has combined permissions; use separate commands for isolation.
+    description: Automatic job token for Copilot and PR commenting in all mode, or artifact discovery and commenting in report mode. Discovery requires actions read. The all job token has combined permissions; use separate commands for isolation.
     default: ${{ github.token }}
   working-directory:
     description: Project directory relative to checkout. Required for all/lint/run; omitted for report.
@@ -36,14 +36,14 @@ inputs:
   report-token:
     description: Optional comment token override for all/report; defaults to github-token. Never pass it to explicit run jobs.
   report-id:
-    description: Stable report identity. Report jobs require a literal unique value and a non-matrix job.
+    description: Shared identity across lint, run, and report; defaults to evals. Report discovers matching current-run/attempt artifacts. Use a distinct literal identity for each independent report and a non-matrix report job.
     default: evals
   source-artifact-id:
-    description: Positive structured-report artifact ID; report command downloads it directly.
+    description: Optional primary artifact ID override for report. Pair with source-artifact-digest to bypass discovery and download exactly this artifact.
   source-artifact-digest:
-    description: SHA-256 digest returned when the structured report artifact was uploaded; report command only.
+    description: SHA-256 upload digest paired with source-artifact-id. Omit both for automatic discovery; report command only.
   lint-artifact-id:
-    description: Optional companion lint artifact ID when reporting a run and lint together; report command only. Its report ID is the primary ID prefix plus -lint.
+    description: Optional lint artifact override, paired with lint-artifact-digest. Otherwise discovered alongside the run. Supports the shared report ID or legacy prefix plus -lint; report command only.
   lint-artifact-digest:
     description: SHA-256 digest for the optional companion lint artifact; report command only.
   upload-transcripts:

@@ -37,7 +37,7 @@ export interface Report {
   groups?: Array<{ identity: string; name?: string; passed: boolean; trials: number; stimuliRun: number; stimuliTotal: number; skipped: number }>;
 }
 export interface ReportExpectation {
-  reportId: string;
+  reportId: string | readonly string[];
   repository: string;
   workflowRunId: number;
   workflowRunAttempt: number;
@@ -136,7 +136,8 @@ export function parseStructuredReport(text: string, expected: ReportExpectation)
   const workflowRunId = positive(raw.workflowRunId, 'workflowRunId');
   const workflowRunAttempt = positive(raw.workflowRunAttempt, 'workflowRunAttempt');
   const revision = string(raw.revision, 'revision', /^[a-f0-9]{40}$/);
-  if (reportId !== expected.reportId || repository !== expected.repository ||
+  if (!(typeof expected.reportId === 'string' ? reportId === expected.reportId : expected.reportId.includes(reportId)) ||
+      repository !== expected.repository ||
       workflowRunId !== expected.workflowRunId || workflowRunAttempt !== expected.workflowRunAttempt ||
       revision !== expected.revision) {
     throw new Error('Structured report identity does not match the current workflow.');

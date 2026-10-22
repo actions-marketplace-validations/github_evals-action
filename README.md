@@ -105,12 +105,15 @@ job: a failed lint or run job already makes the workflow fail, while
 | --- | --- | --- |
 | Lint | `lint` | `contents: read` |
 | Evaluate | `run` | `contents: read`, `copilot-requests: write` |
-| Comment | `report` | `contents: read`, `pull-requests: write` |
+| Comment | `report` | `actions: read`, `contents: read`, `pull-requests: write` |
 
 This complete alternative keeps PR-write permission out of the evaluator job.
 Each execution job needs a checkout because jobs have separate filesystems;
 the reporting job does not. All tokens below are GitHub-generated job tokens,
-not PATs or stored secrets.
+not PATs or stored secrets. Artifacts are uploaded automatically by `lint` and
+`run`. The `report` step discovers them by the shared `report-id` (default
+`evals`), so no step IDs, job outputs, artifact inputs, or fallback report steps
+are needed.
 
 <details>
 <summary>Show the three-job workflow</summary>
@@ -134,19 +137,14 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-    outputs:
-      artifact-id: ${{ steps.lint.outputs.artifact-id }}
-      artifact-digest: ${{ steps.lint.outputs.artifact-digest }}
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - uses: github/evals-action@v0
-        id: lint
         with:
           command: lint
           working-directory: evals
-          report-id: evals-lint
 
   run:
     needs: lint
@@ -155,29 +153,25 @@ jobs:
     permissions:
       contents: read
       copilot-requests: write
-    outputs:
-      artifact-id: ${{ steps.run.outputs.artifact-id }}
-      artifact-digest: ${{ steps.run.outputs.artifact-digest }}
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - uses: github/evals-action@v0
-        id: run
         with:
           command: run
           working-directory: evals
           suite: smoke
-          report-id: evals-run
           copilot-token: ${{ github.token }}
           max-retries: 0
 
   report:
     needs: [lint, run]
-    if: always() && github.event_name == 'pull_request' && (needs.run.outputs.artifact-id != '' || needs.lint.outputs.artifact-id != '')
+    if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
+      actions: read
       contents: read
       pull-requests: write
     concurrency:
@@ -187,25 +181,18 @@ jobs:
       - uses: github/evals-action@v0
         with:
           command: report
-          report-id: evals-run
-          source-artifact-id: ${{ needs.run.outputs.artifact-id }}
-          source-artifact-digest: ${{ needs.run.outputs.artifact-digest }}
-          lint-artifact-id: ${{ needs.lint.outputs.artifact-id }}
-          lint-artifact-digest: ${{ needs.lint.outputs.artifact-digest }}
-        if: always() && needs.run.outputs.artifact-id != ''
-      - uses: github/evals-action@v0
-        with:
-          command: report
-          report-id: evals-lint
-          source-artifact-id: ${{ needs.lint.outputs.artifact-id }}
-          source-artifact-digest: ${{ needs.lint.outputs.artifact-digest }}
-        if: always() && needs.run.outputs.artifact-id == '' && needs.lint.outputs.artifact-id != ''
 ```
 
 </details>
 
-The two report steps are mutually exclusive: either report both results or
-report only the available lint evidence. Both use the same comment identity `evals`.
+The report step prefers run evidence and includes lint evidence when available.
+If the run produced no artifact, it reports lint only with a warning, never an
+evaluation pass. No matching artifacts is an explicit reporting failure.
+Discovery is restricted to this workflow run and attempt; rerunning just the
+report job does not reuse earlier-attempt artifacts. Rerun the producing jobs
+as well. Missing digests, expired artifacts, and multiple matches for the same
+command fail rather than selecting an arbitrary result.
+
 Do not give the run job PR-write permission if you want isolation. Explicit
 `run` does not consume the automatic `github-token`; pass `copilot-token` or
 name advanced credentials explicitly. `report` uses its own automatic job
@@ -215,6 +202,34 @@ The explicit `run` step sets `max-retries: 0` to match simple mode; otherwise
 explicit run retains Vally's retry default. If eval execution cannot produce an
 artifact, only the available lint evidence is reported; the failed run job is
 still visible in GitHub checks.
+
+### Custom identities and explicit overrides
+
+For independent suites, set the same identity on each suite's lint, run and
+report steps, for example `report-id: smoke` or `report-id: regression`. Keep
+one serialized report step per identity. Automatic discovery also recognizes
+the legacy `evals-run` / `evals-lint` identities on artifacts produced by this
+version, but using one shared identity is simpler.
+
+Explicit IDs and digests remain available. For example, the old wiring is
+still supported when you need to select exact artifacts:
+
+```yaml
+with:
+  command: report
+  report-id: evals-run
+  source-artifact-id: ${{ needs.run.outputs.artifact-id }}
+  source-artifact-digest: ${{ needs.run.outputs.artifact-digest }}
+  lint-artifact-id: ${{ needs.lint.outputs.artifact-id }}
+  lint-artifact-digest: ${{ needs.lint.outputs.artifact-digest }}
+```
+
+Providing the primary ID/digest pair bypasses discovery entirely; it reports
+only that artifact and any explicitly supplied lint companion, preserving
+existing workflows without requiring `actions: read`. Alternatively, supply
+only the lint ID/digest pair to override lint while discovering run evidence.
+Overrides still undergo digest and repository/revision/run/attempt checks.
+Artifacts uploaded by older Action versions require explicit IDs/digests.
 
 ## Commands
 
@@ -242,17 +257,17 @@ explicit lint rejects execution overrides.
 | `suite` | Native suite for all/run; mutually exclusive with paths/tags. |
 | `eval-paths` | Newline-separated literal paths for all/run. Spaces are preserved. No shell expansion. |
 | `tags` | Newline-separated native filters for all/run, e.g. `cost=free` or `flaky!=yes`. |
-| `github-token` | Defaults to `${{ github.token }}`. Used for model auth and PR reporting in all; reporting only in report; not forwarded in explicit lint/run. |
+| `github-token` | Defaults to `${{ github.token }}`. Used for model auth and PR reporting in all; artifact discovery and commenting in report; not forwarded in explicit lint/run. Discovery requires `actions: read`. |
 | `copilot-token` | Optional explicit model token. Overrides automatic model auth in all; required for workflow-token auth in explicit run. |
 | `credential-env` | Advanced evaluator credential variable names, one per line, for BYOK/custom providers. Supplying these disables automatic model-token injection in all. Never put values here. Cannot list `COPILOT_GITHUB_TOKEN` with `copilot-token`. |
-| `report-token` | Optional bot/App comment token override for all/report. Human/PAT reporters are refused. Not valid on explicit lint/run. |
-| `report-id` | Stable report identity, default `evals`; letters/digits/underscore/hyphen. Maximum 64 characters (59-character prefix for all). Advanced `evals-run` / `evals-lint` share the `evals` comment. |
+| `report-token` | Optional bot/App comment token override for all/report. Discovery uses `github-token`, falling back to this token if absent. Human/PAT reporters are refused. Not valid on explicit lint/run. |
+| `report-id` | Shared lint/run/report identity, default `evals`; letters/digits/underscore/hyphen. Maximum 64 characters (59-character prefix for all). Advanced `evals-run` / `evals-lint` share the `evals` comment. |
 | `vally-version` | Default `latest`, resolved once per job to the npm latest stable release. Set an exact published stable version to pin the CLI. No per-version Action update is required. |
 | `model` | Native model override, including comma-separated native model lists. |
 | `runs`, `workers`, `timeout` | Positive integer native run overrides. Timeout is per trial in seconds. |
 | `max-retries` | Nonnegative run override. All mode defaults to 0; explicit run preserves native default. |
-| `source-artifact-id`, `source-artifact-digest` | Required for report: exact primary artifact ID and its 64-character lowercase SHA-256 digest. |
-| `lint-artifact-id`, `lint-artifact-digest` | Optional paired companion lint evidence for report. The companion report ID is the primary ID prefix plus `-lint`. |
+| `source-artifact-id`, `source-artifact-digest` | Optional paired overrides for report: exact primary artifact ID and its 64-character lowercase SHA-256 digest. Omit for automatic discovery. Providing both bypasses all discovery. |
+| `lint-artifact-id`, `lint-artifact-digest` | Optional paired lint override for report. Uses the shared report ID or legacy primary ID prefix plus `-lint`. Without a primary override, run evidence is still discovered. |
 | `upload-transcripts` | Default false; opt in to raw native JSONL and stdout/stderr, potentially sensitive. |
 | `artifact-retention-days` | 1-90, default 7; subject to repository retention policy. |
 
@@ -329,11 +344,16 @@ edited, and ambiguous writes are not retried.
 The reporting job (or workflow) must use the exact non-cancelling concurrency
 group shown above. Workflow source at the immutable run revision is validated;
 matrix/reusable-job report topology and ambiguous report identities are refused.
-Multiple report steps for one ID must be mutually exclusive, as in the advanced
-example. Separate jobs using the same report ID must use the same concurrency
-group.
+Keep concurrency on the report job for separate commands: lint and run do not
+need it. It serializes comment writers so overlapping runs cannot both create
+a comment or overwrite a newer result. `cancel-in-progress: false` lets an
+active reporter finish. Omitting this block fails PR reporting explicitly.
+Legacy paired `-run` / `-lint` report steps remain supported but must be
+mutually exclusive. Separate reporting jobs must use the same concurrency group.
 
-Report mode downloads its artifacts itself, verifies digests and current
+Report mode discovers artifacts using the authenticated current-run listing
+and its SHA-256 digests, or uses explicit ID/digest pairs. It downloads the
+selected artifacts itself, verifies digests and current
 repository/revision/run/attempt identity, and accepts only a bounded
 `report.json`. A companion must be successful lint from the same run/revision,
 but it can originate in a separate lint job.

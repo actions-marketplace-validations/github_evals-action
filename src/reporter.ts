@@ -85,7 +85,7 @@ export async function postReport(
   if (artifactId !== undefined) positive(artifactId);
   if (report.reportId.replace(/-(?:lint|run)$/, '') !== context.reportId ||
         (companion && (report.command !== 'run' || companion.report.command !== 'lint' ||
-          companion.report.reportId !== `${context.reportId}-lint` ||
+          ![report.reportId, context.reportId, `${context.reportId}-lint`].includes(companion.report.reportId) ||
           companion.report.outcome !== 'validated' ||
           companion.report.repository !== report.repository ||
           companion.report.revision !== report.revision ||

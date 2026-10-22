@@ -6,18 +6,21 @@ import { runAction } from '../src/action.js';
 import type { NativeResult } from '../src/native.js';
 import { structuredReport, type Report } from '../src/reporting.js';
 import type { Inputs } from '../src/inputs.js';
+import { reportArtifactName } from '../src/artifacts.js';
 
 const mocks = vi.hoisted(() => ({
   inputs: {} as Record<string, string>,
   setSecret: vi.fn(), setFailed: vi.fn(), warning: vi.fn(), setOutput: vi.fn(),
   summaryRaw: vi.fn(), summaryWrite: vi.fn(async () => {}),
-  upload: vi.fn(async () => ({ id: 123, digest: 'd'.repeat(64) })),
+  upload: vi.fn<(name: string, files: string[], directory: string, options: { retentionDays: number }) => Promise<{ id: number; digest: string }>>(
+    async () => ({ id: 123, digest: 'd'.repeat(64) })),
   download: vi.fn(), downloadReport: '', downloadReports: {} as Record<number, string>,
   post: vi.fn<typeof import('../src/reporter.js').postReport>(async () => 'created'),
   revision: 'a'.repeat(40),
   nativeEnv: vi.fn(), acquire: vi.fn(),
   result: {} as NativeResult,
   lintResult: {} as NativeResult, nativeCommands: vi.fn(),
+  fetch: vi.fn<typeof fetch>(),
 }));
 vi.mock('@actions/core', () => ({
   getInput: (key: string) => mocks.inputs[key] ?? '',
@@ -64,6 +67,8 @@ beforeEach(async () => {
   mocks.revision = 'a'.repeat(40);
   mocks.inputs = { command: 'run', 'working-directory': '.', suite: 'smoke' };
   mocks.downloadReports = {};
+  mocks.fetch.mockImplementation(async () => Response.json({ artifacts: [] }));
+  vi.stubGlobal('fetch', mocks.fetch);
   mocks.result = { outcome: 'failed', completeness: 'complete', category: 'none', code: 'native-verdict-failed', executed: 1, passed: 0, failed: 1 };
   mocks.lintResult = { outcome: 'validated', completeness: 'unknown', category: 'none', code: 'native-lint-validated', executed: 0 };
   root = await mkdtemp(join(tmpdir(), 'evals-action-control-'));
@@ -106,6 +111,7 @@ afterEach(async () => {
   Object.defineProperty(process, 'platform', platform);
   Object.defineProperty(process, 'arch', architecture);
   vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
   await rm(root, { recursive: true, force: true });
 });
 
@@ -123,6 +129,139 @@ it('reports the native failed verdict without initializing GitHub reporting', as
   const stored = await readFile(join(root, directory, 'report.json'), 'utf8');
   expect(stored).toContain('"schemaVersion": 2');
   expect(stored).toContain('"suite": "smoke"');
+  expect(mocks.upload.mock.calls[0]?.[0]).toMatch(/^evals-report\.evals\.run\.1\.[A-Za-z0-9]{6}$/);
+});
+
+function discovery(reports: Record<number, Report>): void {
+  mocks.downloadReports = Object.fromEntries(Object.entries(reports).map(([id, report]) => [id, structuredReport(report)]));
+  mocks.fetch.mockImplementation(async () => Response.json({
+    artifacts: Object.entries(reports).map(([id, report]) => ({
+      id: Number(id), name: reportArtifactName(report.reportId, report.command, report.workflowRunAttempt, 'ABC123'),
+      digest: `sha256:${'d'.repeat(64)}`, expired: false, workflow_run: { id: report.workflowRunId },
+    })),
+  }));
+  mocks.inputs = { command: 'report', 'github-token': 'automatic-token' };
+}
+
+it('automatically discovers shared-identity lint and run evidence and posts once without executing Vally', async () => {
+  discovery({ 123: importedReport(), 124: { ...importedLint(), reportId: 'evals' } });
+  await runAction();
+  expect(mocks.setFailed).not.toHaveBeenCalled();
+  expect(mocks.post).toHaveBeenCalledExactlyOnceWith(expect.anything(), expect.objectContaining({ reportId: 'evals' }),
+    expect.objectContaining({ command: 'run', outcome: 'passed' }), 123,
+    { artifactId: 124, report: expect.objectContaining({ command: 'lint', reportId: 'evals', outcome: 'validated' }) });
+  expect(mocks.fetch).toHaveBeenCalledWith(
+    'https://api.github.com/repos/o/r/actions/runs/100/artifacts?per_page=100&page=1',
+    expect.objectContaining({ headers: expect.objectContaining({ Authorization: 'Bearer automatic-token' }) }),
+  );
+  expect(mocks.download).toHaveBeenCalledTimes(2);
+  expect(mocks.download).toHaveBeenCalledWith(123, expect.objectContaining({ expectedHash: `sha256:${'d'.repeat(64)}` }));
+  expect(mocks.acquire).not.toHaveBeenCalled();
+  expect(mocks.nativeCommands).not.toHaveBeenCalled();
+  expect(mocks.upload).not.toHaveBeenCalled();
+});
+
+it.each(['validated', 'error'] as const)('reports available lint %s when no run artifact exists', async (outcome) => {
+  discovery({ 124: { ...importedLint(), reportId: 'evals', outcome } });
+  await runAction();
+  expect(mocks.setFailed).not.toHaveBeenCalled();
+  expect(mocks.post).toHaveBeenCalledExactlyOnceWith(expect.anything(), expect.anything(),
+    expect.objectContaining({ command: 'lint', outcome }), 124, undefined);
+  expect(mocks.warning).toHaveBeenCalledWith(expect.stringContaining('not an evaluation pass'));
+  expect(mocks.setOutput).toHaveBeenCalledWith('outcome', outcome);
+});
+
+it('supports run-only evidence, custom shared identities, and comment-token overrides', async () => {
+  discovery({ 123: importedReport({ reportId: 'smoke', outcome: 'error' }) });
+  mocks.inputs['report-id'] = 'smoke';
+  mocks.inputs['report-token'] = 'comment-bot-token';
+  await runAction();
+  expect(mocks.setFailed).not.toHaveBeenCalled();
+  expect(mocks.setSecret).toHaveBeenCalledWith('comment-bot-token');
+  expect(mocks.post).toHaveBeenCalledExactlyOnceWith(expect.anything(), expect.objectContaining({ reportId: 'smoke' }),
+    expect.objectContaining({ reportId: 'smoke', outcome: 'error' }), 123, undefined);
+  expect(mocks.fetch.mock.calls[0]?.[1]?.headers).toHaveProperty('Authorization', 'Bearer automatic-token');
+});
+
+it('uses an explicit lint override alongside an automatically discovered run or as lint-only evidence', async () => {
+  discovery({ 123: importedReport(), 124: { ...importedLint(), reportId: 'evals' } });
+  mocks.inputs['lint-artifact-id'] = '125';
+  mocks.inputs['lint-artifact-digest'] = 'e'.repeat(64);
+  mocks.downloadReports[125] = structuredReport({ ...importedLint(), reportId: 'evals' });
+  await runAction();
+  expect(mocks.setFailed).not.toHaveBeenCalled();
+  expect(mocks.download).not.toHaveBeenCalledWith(124, expect.anything());
+  expect(mocks.download).toHaveBeenCalledWith(125, expect.objectContaining({ expectedHash: `sha256:${'e'.repeat(64)}` }));
+  expect(mocks.post.mock.calls[0]?.[4]).toHaveProperty('artifactId', 125);
+  mocks.fetch.mockResolvedValue(Response.json({ artifacts: [] }));
+  mocks.post.mockClear();
+  await runAction();
+  expect(mocks.post).toHaveBeenCalledExactlyOnceWith(expect.anything(), expect.anything(),
+    expect.objectContaining({ command: 'lint' }), 125, undefined);
+});
+
+it('rejects a lint override pointing at the discovered run instead of silently ignoring it', async () => {
+  discovery({ 123: importedReport() });
+  mocks.inputs['lint-artifact-id'] = '123';
+  mocks.inputs['lint-artifact-digest'] = 'd'.repeat(64);
+  await runAction();
+  expect(mocks.setFailed).toHaveBeenCalledWith(expect.stringContaining('source-artifact-command-mismatch'));
+  expect(mocks.post).not.toHaveBeenCalled();
+});
+
+it('uses the report token for discovery when the automatic token is absent', async () => {
+  discovery({ 123: importedReport() });
+  delete mocks.inputs['github-token'];
+  mocks.inputs['report-token'] = 'report-only-token';
+  await runAction();
+  expect(mocks.setFailed).not.toHaveBeenCalled();
+  expect(mocks.fetch.mock.calls[0]?.[1]?.headers).toHaveProperty('Authorization', 'Bearer report-only-token');
+});
+
+it('uses explicit shared-identity artifact pairs without discovery', async () => {
+  discovery({ 123: importedReport(), 124: { ...importedLint(), reportId: 'evals' } });
+  mocks.inputs['source-artifact-id'] = '123';
+  mocks.inputs['source-artifact-digest'] = 'd'.repeat(64);
+  mocks.inputs['lint-artifact-id'] = '124';
+  mocks.inputs['lint-artifact-digest'] = 'd'.repeat(64);
+  await runAction();
+  expect(mocks.setFailed).not.toHaveBeenCalled();
+  expect(mocks.fetch).not.toHaveBeenCalled();
+  expect(mocks.post.mock.calls[0]?.[4]).toHaveProperty('report.reportId', 'evals');
+});
+
+it('fails missing current-attempt evidence and discovery permission errors without posting or uploading', async () => {
+  discovery({ 123: importedReport({ workflowRunAttempt: 2 }) });
+  await runAction();
+  expect(mocks.setFailed).toHaveBeenCalledWith(expect.stringContaining('report-artifacts-not-found'));
+  mocks.fetch.mockResolvedValue(new Response(null, { status: 403 }));
+  await runAction();
+  expect(mocks.setFailed).toHaveBeenCalledWith(expect.stringContaining('github-http-403'));
+  expect(mocks.post).not.toHaveBeenCalled();
+  expect(mocks.upload).not.toHaveBeenCalled();
+  expect(mocks.download).not.toHaveBeenCalled();
+});
+
+it.each([
+  { workflowRunAttempt: 2 }, { workflowRunId: 101 }, { revision: 'f'.repeat(40) },
+  { repository: 'o/other' }, { reportId: 'other' },
+])('verifies discovered report contents against current identity %j', async (overrides) => {
+  discovery({ 123: importedReport() });
+  mocks.downloadReports[123] = structuredReport(importedReport(overrides));
+  await runAction();
+  expect(mocks.setFailed).toHaveBeenCalled();
+  expect(mocks.post).not.toHaveBeenCalled();
+});
+
+it('verifies discovered command labels and archive digests before posting', async () => {
+  discovery({ 123: importedReport() });
+  mocks.downloadReports[123] = structuredReport({ ...importedLint(), reportId: 'evals' });
+  await runAction();
+  expect(mocks.setFailed).toHaveBeenCalledWith(expect.stringContaining('source-artifact-command-mismatch'));
+  mocks.download.mockResolvedValue({ downloadPath: root, digestMismatch: true });
+  await runAction();
+  expect(mocks.setFailed).toHaveBeenCalledWith(expect.stringContaining('source-artifact-digest-mismatch'));
+  expect(mocks.post).not.toHaveBeenCalled();
 });
 
 it('downloads and posts a digest-bound report without acquiring or executing Vally', async () => {
@@ -144,6 +283,7 @@ it('downloads and posts a digest-bound report without acquiring or executing Val
     expectedHash: `sha256:${'d'.repeat(64)}`,
   }));
   expect(mocks.setOutput).toHaveBeenCalledWith('outcome', 'passed');
+  expect(mocks.fetch).not.toHaveBeenCalled();
 });
 
 it('validates both separate-job artifacts before updating one comment', async () => {
@@ -394,6 +534,8 @@ it('defaults to lint then run and posts once using the automatic shared job toke
   expect(process.env['INPUT_GITHUB-TOKEN']).toBeUndefined();
   expect(mocks.acquire).toHaveBeenCalledTimes(1);
   expect(mocks.upload).toHaveBeenCalledTimes(2);
+  expect(mocks.upload.mock.calls[0]?.[0]).toMatch(/^evals-report\.evals-lint\.lint\.1\.[A-Za-z0-9]{6}$/);
+  expect(mocks.upload.mock.calls[1]?.[0]).toMatch(/^evals-report\.evals\.run\.1\.[A-Za-z0-9]{6}$/);
   expect(mocks.post).toHaveBeenCalledTimes(1);
   expect(mocks.post).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ reportId: 'evals' }),
     expect.objectContaining({ command: 'run', suite: 'smoke', outcome: 'passed' }), 124,
