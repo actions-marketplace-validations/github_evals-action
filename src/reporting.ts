@@ -22,6 +22,7 @@ export interface ReportTokens {
 export interface ReportGroup {
   identity: string;
   name?: string;
+  model?: string;
   passed: boolean;
   trials: number;
   stimuliRun: number;
@@ -29,6 +30,7 @@ export interface ReportGroup {
   skipped: number;
   overallScore?: number;
   threshold?: number;
+  turns?: number;
   durationMs?: number;
   tokens?: ReportTokens;
 }
@@ -50,6 +52,7 @@ export interface Report {
   executed?: number;
   passed?: number;
   failed?: number;
+  turns?: number;
   durationMs?: number;
   tokens?: ReportTokens;
   engine?: { version: string; sha256: string; dependencySha256?: string; lockSha256?: string };
@@ -103,14 +106,14 @@ export function formatTokens(tokens?: ReportTokens): string {
 
 export function hasQualityDetails(groups: readonly ReportGroup[] | undefined): boolean {
   return Boolean(groups?.some((group) =>
-    group.overallScore !== undefined || group.durationMs !== undefined || group.tokens !== undefined));
+    group.overallScore !== undefined || group.turns !== undefined || group.durationMs !== undefined || group.tokens !== undefined));
 }
 
 export function renderQualitySection(
   heading: string, groups: readonly ReportGroup[], maxGroups = 25, maxBytes = 16_000,
 ): string {
   if (maxBytes <= 0 || groups.length === 0) return '';
-  const header = `${heading}\n\n| Eval | Verdict | Score | Duration | Tokens |\n| --- | --- | --- | --- | --- |\n`;
+  const header = `${heading}\n\n| Eval | Model | Verdict | Score | Turns | Duration | Tokens |\n| --- | --- | --- | --- | --- | --- | --- |\n`;
   const footer = '\n\nFurther groups are available in the structured artifact.';
   const footerBytes = Buffer.byteLength(footer, 'utf8');
   const limit = Math.min(groups.length, maxGroups);
@@ -119,8 +122,9 @@ export function renderQualitySection(
   for (let index = 0; index < limit; index++) {
     const group = groups[index]!;
     const groupName = escapeMarkdown(group.name ?? group.identity.slice(0, 12));
+    const modelName = group.model ? escapeMarkdown(group.model) : '-';
     const verdict = group.trials === 0 ? 'not-run' : group.passed ? 'passed' : 'failed';
-    const row = `| ${groupName} | ${verdict} | ${formatScore(group.overallScore, group.threshold)} | ${formatDuration(group.durationMs)} | ${formatTokens(group.tokens)} |`;
+    const row = `| ${groupName} | ${modelName} | ${verdict} | ${formatScore(group.overallScore, group.threshold)} | ${group.turns === undefined ? '-' : String(group.turns)} | ${formatDuration(group.durationMs)} | ${formatTokens(group.tokens)} |`;
     const rowBytes = Buffer.byteLength((rows.length ? '\n' : '') + row, 'utf8');
     const needsFooterAfterRow = index + 1 < groups.length;
     if (usedBytes + rowBytes + (needsFooterAfterRow ? footerBytes : 0) > maxBytes) break;
@@ -135,8 +139,137 @@ export function renderQualitySection(
   return Buffer.byteLength(result, 'utf8') <= maxBytes ? result : '';
 }
 
-export function renderSummary(report: Report): string {
+export function classifyGroupTransition(baseline?: ReportGroup, candidate?: ReportGroup): string {
+  if (!baseline) return 'added';
+  if (!candidate) return 'removed';
+  if (baseline.trials === 0 || candidate.trials === 0) return 'not-run';
+  if (!baseline.passed && candidate.passed) return 'fixed';
+  if (baseline.passed && !candidate.passed) return 'regressed';
+  if (baseline.overallScore !== undefined && candidate.overallScore !== undefined) {
+    const scoreDelta = candidate.overallScore - baseline.overallScore;
+    if (scoreDelta >= 0.0005) return 'improved-score';
+    if (scoreDelta <= -0.0005) return 'regressed';
+  }
+  if (baseline.trials === candidate.trials && baseline.tokens !== undefined && candidate.tokens !== undefined) {
+    if (candidate.tokens.total < baseline.tokens.total) return 'reduced-tokens';
+    if (candidate.tokens.total > baseline.tokens.total) return 'increased-tokens';
+    if (baseline.tokens.output !== undefined && candidate.tokens.output !== undefined) {
+      if (candidate.tokens.output < baseline.tokens.output) return 'reduced-tokens';
+      if (candidate.tokens.output > baseline.tokens.output) return 'increased-tokens';
+    }
+  }
+  return 'unchanged';
+}
+
+export function formatSignedCount(baseline?: number, candidate?: number): string {
+  if (baseline === undefined || candidate === undefined) return '-';
+  const delta = candidate - baseline;
+  return delta > 0 ? `+${delta}` : `${delta}`;
+}
+
+export function formatScoreDelta(baseline?: number, candidate?: number): string {
+  if (baseline === undefined || candidate === undefined) return '-';
+  const delta = candidate - baseline;
+  if (Math.abs(delta) < 0.0005) return '0.00';
+  if (Math.abs(delta) < 0.005) return `${delta > 0 ? '+' : ''}${delta.toFixed(3)}`;
+  return `${delta > 0 ? '+' : ''}${delta.toFixed(2)}`;
+}
+
+export function formatDurationDelta(baselineMs?: number, candidateMs?: number): string {
+  if (baselineMs === undefined || candidateMs === undefined) return '-';
+  const delta = candidateMs - baselineMs;
+  if (delta === 0) return '0ms (0.0%)';
+  const sign = delta > 0 ? '+' : '';
+  const pct = baselineMs > 0 ? ` (${sign}${((delta / baselineMs) * 100).toFixed(1)}%)` : '';
+  return `${sign}${delta}ms${pct}`;
+}
+
+export function formatTokenDelta(baselineTokens?: ReportTokens, candidateTokens?: ReportTokens): string {
+  if (baselineTokens === undefined || candidateTokens === undefined) return '-';
+  const delta = candidateTokens.total - baselineTokens.total;
+  const sign = delta > 0 ? '+' : '';
+  const pct = baselineTokens.total > 0 ? `${sign}${((delta / baselineTokens.total) * 100).toFixed(1)}%` : undefined;
+  let outSuffix = '';
+  if (baselineTokens.output !== undefined && candidateTokens.output !== undefined) {
+    const outDelta = candidateTokens.output - baselineTokens.output;
+    if (outDelta !== 0) {
+      const outSign = outDelta > 0 ? '+' : '';
+      const outPct = baselineTokens.output > 0 ? ` / ${outSign}${((outDelta / baselineTokens.output) * 100).toFixed(1)}%` : '';
+      outSuffix = `${pct ? '; ' : ''}out: ${outSign}${outDelta}${outPct}`;
+    }
+  }
+  const parens = pct || outSuffix ? ` (${pct ?? ''}${outSuffix})` : delta === 0 ? ' (0.0%)' : '';
+  return `${sign}${delta} tokens${parens}`;
+}
+
+function formatGroupCell(group?: ReportGroup): string {
+  if (!group) return '-';
+  const verdict = group.trials === 0 ? 'not-run' : group.passed ? 'passed' : 'failed';
+  return group.overallScore !== undefined ? `${verdict} (${group.overallScore.toFixed(2)})` : verdict;
+}
+
+export function renderComparisonSection(
+  heading: string, baseline: Report, candidate: Report, maxGroups = 25, maxBytes = 16_000,
+): string {
+  if (maxBytes <= 0) return '';
+  const outcomeTransition = baseline.outcome === 'failed' && candidate.outcome === 'passed'
+    ? 'fixed'
+    : baseline.outcome === 'passed' && candidate.outcome === 'failed'
+      ? 'regressed'
+      : baseline.outcome === candidate.outcome ? 'unchanged' : `${baseline.outcome} -> ${candidate.outcome}`;
+  const hasBothGroups = baseline.groups !== undefined && candidate.groups !== undefined;
+  const baseGroups = baseline.groups ?? [];
+  const candGroups = candidate.groups ?? [];
+  const baseMap = new Map(baseGroups.map((group) => [group.identity, group]));
+  const candMap = new Map(candGroups.map((group) => [group.identity, group]));
+  const keys = [...new Set([...baseMap.keys(), ...candMap.keys()])];
+  const workloadsMatch = hasBothGroups &&
+    baseline.selection === candidate.selection &&
+    baseline.executed !== undefined && baseline.executed === candidate.executed &&
+    baseGroups.length === candGroups.length &&
+    keys.every((key) => {
+      const b = baseMap.get(key), c = candMap.get(key);
+      return b !== undefined && c !== undefined && b.trials === c.trials;
+    });
+  const summaryTable =
+    `${heading}\n\n` +
+    '| Metric | Baseline | Candidate | Delta |\n| --- | --- | --- | --- |\n' +
+    `| Outcome | ${baseline.outcome} | ${candidate.outcome} | ${outcomeTransition} |\n` +
+    `| Passed | ${baseline.passed ?? '-'} | ${candidate.passed ?? '-'} | ${formatSignedCount(baseline.passed, candidate.passed)} |\n` +
+    `| Failed | ${baseline.failed ?? '-'} | ${candidate.failed ?? '-'} | ${formatSignedCount(baseline.failed, candidate.failed)} |\n` +
+    `| Turns | ${baseline.turns ?? '-'} | ${candidate.turns ?? '-'} | ${workloadsMatch ? formatSignedCount(baseline.turns, candidate.turns) : '-'} |\n` +
+    `| Duration | ${formatDuration(baseline.durationMs)} | ${formatDuration(candidate.durationMs)} | ${workloadsMatch ? formatDurationDelta(baseline.durationMs, candidate.durationMs) : '-'} |\n` +
+    `| Tokens | ${formatTokens(baseline.tokens)} | ${formatTokens(candidate.tokens)} | ${workloadsMatch ? formatTokenDelta(baseline.tokens, candidate.tokens) : '-'} |`;
+  if (Buffer.byteLength(summaryTable, 'utf8') > maxBytes) return '';
+  if (!hasBothGroups || (baseGroups.length === 0 && candGroups.length === 0)) return summaryTable;
+  const groupHeader = '\n\n| Eval | Baseline | Candidate | Score Delta | Turns Delta | Duration Delta | Token Delta | Transition |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n';
+  const footer = '\n\nFurther groups are available in the structured artifact.';
+  const footerBytes = Buffer.byteLength(footer, 'utf8');
+  let usedBytes = Buffer.byteLength(summaryTable + groupHeader, 'utf8');
+  if (usedBytes > maxBytes) return summaryTable;
+  const limit = Math.min(keys.length, maxGroups);
+  const rows: string[] = [];
+  for (let index = 0; index < limit; index++) {
+    const key = keys[index]!;
+    const baseGroup = baseMap.get(key);
+    const candGroup = candMap.get(key);
+    const displayName = escapeMarkdown((candGroup ?? baseGroup)!.name ?? (candGroup ?? baseGroup)!.identity.slice(0, 12));
+    const sameTrials = baseGroup !== undefined && candGroup !== undefined && baseGroup.trials === candGroup.trials;
+    const row = `| ${displayName} | ${formatGroupCell(baseGroup)} | ${formatGroupCell(candGroup)} | ${formatScoreDelta(baseGroup?.overallScore, candGroup?.overallScore)} | ${sameTrials ? formatSignedCount(baseGroup?.turns, candGroup?.turns) : '-'} | ${sameTrials ? formatDurationDelta(baseGroup?.durationMs, candGroup?.durationMs) : '-'} | ${sameTrials ? formatTokenDelta(baseGroup?.tokens, candGroup?.tokens) : '-'} | ${classifyGroupTransition(baseGroup, candGroup)} |`;
+    const rowBytes = Buffer.byteLength((rows.length ? '\n' : '') + row, 'utf8');
+    const needsFooterAfterRow = index + 1 < keys.length;
+    if (usedBytes + rowBytes + (needsFooterAfterRow ? footerBytes : 0) > maxBytes) break;
+    rows.push(row);
+    usedBytes += rowBytes;
+  }
+  if (rows.length === 0) return summaryTable;
+  const result = summaryTable + groupHeader + rows.join('\n') + (rows.length < keys.length ? footer : '');
+  return Buffer.byteLength(result, 'utf8') <= maxBytes ? result : summaryTable;
+}
+
+export function renderSummary(report: Report, baseline?: Report): string {
   const metrics = [
+    ...(report.turns !== undefined ? [`Turns: ${report.turns}.`] : []),
     ...(report.durationMs !== undefined ? [`Duration: ${report.durationMs}ms.`] : []),
     ...(report.tokens !== undefined ? [
       report.tokens.input !== undefined && report.tokens.output !== undefined
@@ -144,6 +277,7 @@ export function renderSummary(report: Report): string {
         : `Tokens: ${report.tokens.total}.`,
     ] : []),
   ].join(' ');
+  const comparison = baseline ? renderComparisonSection('## Baseline vs. Candidate comparison', baseline, report) : '';
   return `# Evals: ${report.outcome}\n\n` +
     `Command: ${escapeMarkdown(report.command)}. Plan: ${report.completeness}.\n\n` +
     (report.suite ? `Suite: ${escapeMarkdown(report.suite)}.\n\n` : '') +
@@ -158,7 +292,8 @@ export function renderSummary(report: Report): string {
       (report.groups.length > 100 ? `\n\n${report.groups.length - 100} further groups are available in the structured artifact.` : '') + '\n' : '') +
     (report.groups && hasQualityDetails(report.groups)
       ? '\n' + renderQualitySection('## Quality and token usage', report.groups) + '\n'
-      : '');
+      : '') +
+    (comparison ? '\n' + comparison + '\n' : '');
 }
 
 function serializeTokens(tokens: ReportTokens): ReportTokens {
@@ -183,6 +318,7 @@ export function structuredReport(report: Report): string {
     ...(report.executed !== undefined ? { executed: report.executed } : {}),
     ...(report.passed !== undefined ? { passed: report.passed } : {}),
     ...(report.failed !== undefined ? { failed: report.failed } : {}),
+    ...(hasExecutedTrials && report.turns !== undefined ? { turns: report.turns } : {}),
     ...(hasExecutedTrials && report.durationMs !== undefined ? { durationMs: report.durationMs } : {}),
     ...(hasExecutedTrials && report.tokens !== undefined ? { tokens: serializeTokens(report.tokens) } : {}),
     ...(report.engine ? { engine: {
@@ -191,11 +327,12 @@ export function structuredReport(report: Report): string {
     } } : {}),
     ...(report.nativeRunId ? { nativeRunId: report.nativeRunId } : {}),
     ...(report.groups ? { groups: report.groups.map(({
-      identity, name, passed, trials, stimuliRun, stimuliTotal, skipped,
-      overallScore, threshold, durationMs, tokens,
+      identity, name, model, passed, trials, stimuliRun, stimuliTotal, skipped,
+      overallScore, threshold, turns, durationMs, tokens,
     }) => ({
       identity,
       ...(includeGroupNames && name ? { name } : {}),
+      ...(includeGroupNames && model ? { model } : {}),
       passed,
       trials,
       stimuliRun,
@@ -203,6 +340,7 @@ export function structuredReport(report: Report): string {
       skipped,
       ...(includeGroupMetrics && trials > 0 && overallScore !== undefined ? { overallScore } : {}),
       ...(includeGroupMetrics && trials > 0 && threshold !== undefined ? { threshold } : {}),
+      ...(includeGroupMetrics && trials > 0 && turns !== undefined ? { turns } : {}),
       ...(includeGroupMetrics && trials > 0 && durationMs !== undefined ? { durationMs } : {}),
       ...(includeGroupMetrics && trials > 0 && tokens !== undefined ? { tokens: serializeTokens(tokens) } : {}),
     })) } : {}),
@@ -272,7 +410,7 @@ export function parseStructuredReport(text: string, expected: ReportExpectation)
   const allowed = new Set([
     'schemaVersion', 'reportId', 'repository', 'workflowRunId', 'workflowRunAttempt', 'sourceJob', 'selection',
     'command', 'outcome', 'completeness', 'revision', 'category', 'code', 'executed', 'passed', 'failed',
-    'durationMs', 'tokens', 'engine', 'nativeRunId', 'groups', 'suite',
+    'turns', 'durationMs', 'tokens', 'engine', 'nativeRunId', 'groups', 'suite',
   ]);
   if (Object.keys(raw).some((key) => !allowed.has(key))) throw new Error('Structured report contains unsupported fields.');
   if (raw.schemaVersion !== 2) throw new Error('Unsupported Evals Action structured report version.');
@@ -302,14 +440,15 @@ export function parseStructuredReport(text: string, expected: ReportExpectation)
   if (!['configuration', 'execution', 'evidence', 'dependency', 'policy', 'none'].includes(category)) {
     throw new Error('Invalid structured report category.');
   }
-  const optionalCount = (name: 'executed' | 'passed' | 'failed' | 'durationMs') =>
+  const optionalCount = (name: 'executed' | 'passed' | 'failed' | 'turns' | 'durationMs') =>
     raw[name] === undefined ? undefined : count(raw[name], name);
   const executed = optionalCount('executed');
   const passed = optionalCount('passed');
   const failed = optionalCount('failed');
+  const turns = optionalCount('turns');
   const durationMs = optionalCount('durationMs');
   const tokens = raw.tokens === undefined ? undefined : parseTokens(raw.tokens, 'tokens');
-  if ((durationMs !== undefined || tokens !== undefined) && (!executed || executed < 1)) {
+  if ((turns !== undefined || durationMs !== undefined || tokens !== undefined) && (!executed || executed < 1)) {
     throw new Error('Structured report metrics require executed trials.');
   }
   if (outcome === 'passed' && (!(executed && executed > 0) || failed !== 0)) throw new Error('Inconsistent passing structured report.');
@@ -337,12 +476,16 @@ export function parseStructuredReport(text: string, expected: ReportExpectation)
     groups = raw.groups.map((entry) => {
       const value = record(entry);
       if (Object.keys(value).some((key) => ![
-        'identity', 'name', 'passed', 'trials', 'stimuliRun', 'stimuliTotal', 'skipped',
-        'overallScore', 'threshold', 'durationMs', 'tokens',
+        'identity', 'name', 'model', 'passed', 'trials', 'stimuliRun', 'stimuliTotal', 'skipped',
+        'overallScore', 'threshold', 'turns', 'durationMs', 'tokens',
       ].includes(key)) || typeof value.passed !== 'boolean') throw new Error('Invalid structured report group.');
       const name = value.name === undefined ? undefined : string(value.name, 'group.name');
       if (name !== undefined && (name.length > 256 || /[\r\n]/.test(name))) {
         throw new Error('Invalid structured report group name.');
+      }
+      const model = value.model === undefined ? undefined : string(value.model, 'group.model');
+      if (model !== undefined && (model.length > 128 || /[\r\n]/.test(model))) {
+        throw new Error('Invalid structured report group model.');
       }
       const trials = count(value.trials, 'group.trials');
       const stimuliRun = count(value.stimuliRun, 'group.stimuliRun');
@@ -358,19 +501,22 @@ export function parseStructuredReport(text: string, expected: ReportExpectation)
       if ((overallScore === undefined) !== (threshold === undefined)) {
         throw new Error('Invalid structured report group scoring.');
       }
+      const groupTurns = value.turns === undefined ? undefined : count(value.turns, 'group.turns');
       const groupDurationMs = value.durationMs === undefined ? undefined : count(value.durationMs, 'group.durationMs');
       const groupTokens = value.tokens === undefined ? undefined : parseTokens(value.tokens, 'group.tokens');
-      if (trials === 0 && (overallScore !== undefined || threshold !== undefined || groupDurationMs !== undefined || groupTokens !== undefined)) {
+      if (trials === 0 && (overallScore !== undefined || threshold !== undefined || groupTurns !== undefined || groupDurationMs !== undefined || groupTokens !== undefined)) {
         throw new Error('Structured report group with zero trials cannot include execution metrics.');
       }
       return {
         identity: string(value.identity, 'group.identity', /^[a-f0-9]{64}$/),
         ...(name ? { name } : {}),
+        ...(model ? { model } : {}),
         passed: value.passed,
         trials,
         stimuliRun, stimuliTotal, skipped,
         ...(overallScore !== undefined ? { overallScore } : {}),
         ...(threshold !== undefined ? { threshold } : {}),
+        ...(groupTurns !== undefined ? { turns: groupTurns } : {}),
         ...(groupDurationMs !== undefined ? { durationMs: groupDurationMs } : {}),
         ...(groupTokens !== undefined ? { tokens: groupTokens } : {}),
       };
@@ -386,6 +532,10 @@ export function parseStructuredReport(text: string, expected: ReportExpectation)
       throw new Error('Structured report totals contradict native group evidence.');
     }
     const executedGroups = groups.filter((group) => group.trials > 0);
+    const hasGroupTurns = executedGroups.some((group) => group.turns !== undefined);
+    const expectedTurns = hasGroupTurns && executedGroups.every((group) => group.turns !== undefined)
+      ? executedGroups.reduce((total, group) => total + group.turns!, 0)
+      : undefined;
     const hasGroupDuration = executedGroups.some((group) => group.durationMs !== undefined);
     const expectedDurationMs = hasGroupDuration && executedGroups.every((group) => group.durationMs !== undefined)
       ? executedGroups.reduce((total, group) => total + group.durationMs!, 0)
@@ -402,7 +552,8 @@ export function parseStructuredReport(text: string, expected: ReportExpectation)
           total: executedGroups.reduce((sum, group) => sum + group.tokens!.total, 0),
         }
       : undefined;
-    if ((hasGroupDuration && durationMs !== expectedDurationMs) ||
+    if ((hasGroupTurns && turns !== expectedTurns) ||
+        (hasGroupDuration && durationMs !== expectedDurationMs) ||
         (hasGroupTokens && !tokensEqual(tokens, expectedTokens))) {
       throw new Error('Structured report metrics contradict native group evidence.');
     }
@@ -423,6 +574,7 @@ export function parseStructuredReport(text: string, expected: ReportExpectation)
     code: string(raw.code, 'code', /^[a-z0-9-]+$/),
     ...(executed !== undefined ? { executed } : {}), ...(passed !== undefined ? { passed } : {}),
     ...(failed !== undefined ? { failed } : {}),
+    ...(turns !== undefined ? { turns } : {}),
     ...(durationMs !== undefined ? { durationMs } : {}),
     ...(tokens !== undefined ? { tokens } : {}),
     ...(engine ? { engine } : {}),

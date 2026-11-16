@@ -252,6 +252,43 @@ only the lint ID/digest pair to override lint while discovering run evidence.
 Overrides still undergo digest and repository/revision/run/attempt checks.
 Artifacts uploaded by older Action versions require explicit IDs/digests.
 
+### Baseline vs. Candidate PR comparison
+
+To include a **Baseline vs. Candidate comparison** table (Outcome, Passed/Failed,
+Score delta, Turns delta, Duration delta, and Token `in/out` + `%` delta) in the sticky PR
+comment and job summary, run the baseline arm with a distinct `report-id`
+(such as `evals-baseline`), run the candidate arm with `report-id: evals`, and
+pass `baseline-report-id: evals-baseline` to the `report` step:
+
+```yaml
+  report:
+    needs: [lint, run-baseline, run]
+    if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: write
+    concurrency:
+      group: evals-${{ github.workflow_ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: github/evals-action@v0
+        with:
+          command: report
+          report-id: evals
+          baseline-report-id: evals-baseline
+```
+
+`run-baseline` runs in the same workflow run, attempt, and PR checkout revision
+(restoring only the baseline skill or target files before invoking `command: run`
+with `report-id: evals-baseline`), and aggregate turns, duration, and token deltas
+are shown when both arms share the same selection and per-eval trial counts.
+You can also pass `baseline-artifact-id` and `baseline-artifact-digest`
+explicitly instead of discovering the baseline artifact by `baseline-report-id`
+(matching `baseline-report-id`, or `<report-id>-baseline` when omitted).
+
 ## Commands
 
 | `command` | Behavior |
@@ -289,6 +326,8 @@ explicit lint rejects execution overrides.
 | `max-retries` | Nonnegative run override. All mode defaults to 0; explicit run preserves native default. |
 | `source-artifact-id`, `source-artifact-digest` | Optional paired overrides for report: exact primary artifact ID and its 64-character lowercase SHA-256 digest. Omit for automatic discovery. Providing both bypasses all discovery. |
 | `lint-artifact-id`, `lint-artifact-digest` | Optional paired lint override for report. Uses the shared report ID or legacy primary ID prefix plus `-lint`. Without a primary override, run evidence is still discovered. |
+| `baseline-report-id` | Optional baseline report identity for report mode (e.g. `evals-baseline`). Discovers the matching current-run/attempt run artifact unless `baseline-artifact-id` is set. |
+| `baseline-artifact-id`, `baseline-artifact-digest` | Optional paired baseline run override for report mode. Must be distinct from primary and lint artifacts. |
 | `upload-transcripts` | Default false; opt in to raw native JSONL and stdout/stderr, potentially sensitive. |
 | `artifact-retention-days` | 1-90, default 7; subject to repository retention policy. |
 
@@ -318,11 +357,13 @@ A passing check doesn't guarantee the AI will get it right every time.
 | `lint-artifact-id`, `lint-artifact-digest` | Companion lint evidence produced by all after successful lint. |
 | `native-diagnostics-path` | Local raw logs/output directory under runner temporary storage. |
 
-Structured artifacts contain status, revision, suite, bounded native eval names,
-engine/dependency identities, counts, verdicts and hashed group identities.
+Structured artifacts contain status, revision, suite, bounded native eval and
+model names, engine/dependency identities, counts, verdicts, optional
+score/turn/duration/token summaries, and hashed group identities.
 They exclude full source paths, prompts, model output and raw exception text.
-Names are Markdown-escaped in comments; do not store secrets in suite or eval
-names. Comments show at most 100 groups and link to the complete artifact.
+Names are Markdown-escaped in comments; do not store secrets in suite, eval, or
+model names. Comments show at most 100 groups (and up to 25 groups in quality
+and comparison tables) and link to the complete artifact.
 Raw JSONL above 64 MiB is refused rather than partially interpreted.
 
 Optional transcripts may contain prompts, secrets and proprietary code.
