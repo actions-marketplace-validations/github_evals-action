@@ -19,7 +19,8 @@ pnpm check
 ```
 
 `pnpm check` runs type checking, lint, model-free coverage, deterministic
-source-to-bundle comparison, and a clean consumer-directory packaging control.
+source-to-bundle comparison, a clean consumer-directory packaging control, and
+release-planner tests (`pnpm test:release`).
 The clean consumer-directory packaging control deliberately lacks artifact
 credentials and verifies invalid-input failure. Linux CI separately exercises
 the packaged Action with real Vally acquisition, native mock-executor pass/fail
@@ -34,7 +35,7 @@ PR check names map directly to these commands:
 | Lint | `pnpm lint`: source/test lint rules. |
 | Type check | `pnpm typecheck`: strict TypeScript validation. |
 | Unit tests | `pnpm test:coverage`: input, policy, reporting, mocked GitHub, tool reuse, orchestration and real model-free native CLI tests with coverage thresholds. |
-| Bundle verification | `pnpm check:package`: committed bundle freshness and a clean consumer-directory packaged entry-point test. |
+| Bundle verification | `pnpm check:package`: committed bundle freshness, a clean consumer-directory packaged entry-point test, and release-planner tests. |
 | Action smoke test | Executes `uses: ./` on Ubuntu with actual acquisition, native mock-executor pass/fail, lint, installation reuse and artifact upload. No models run. |
 | evals (Copilot E2E workflow) | For relevant same-repository PRs, directly invokes the default Action on the example. This consumes organization Copilot AI credits. |
 
@@ -102,18 +103,51 @@ capability through repository write access and branch governance.
 
 ## Release preparation
 
-The first prerelease is [`v0.1.0`](https://github.com/github/evals-action/releases/tag/v0.1.0).
-Keep published version tags unchanged. For future releases, verify the packaged
-Action at the target commit and update consumer examples to the intended tag.
-Action release versions are independent of the selected Vally version.
+The [`Release` workflow](.github/workflows/release.yml) publishes the current
+`main` head in two ways:
 
-The moving `v0` tag points to the latest approved 0.x release. After publishing
-a new 0.x minor or patch release and verifying its checks, advance only `v0`
-to that release's exact commit. Verify the tag target afterward. Do not move
-version-specific tags, publish a separate GitHub release for the moving tag,
-or use a blanket force-push of all tags. Release publication and advancing the
-alias are separate steps; no automatic tag-moving workflow is configured.
-Keep `v0` on the 0.x line when introducing a future `v1` release.
+- **Automatic patch releases** run after each successful `Model-free CI` push
+  run on `main`, and on a six-hourly reconciliation schedule, only while the
+  repository variable `AUTO_RELEASE` is `true`. They cut the next patch version
+  when `src/`, `dist/` or `action.yml` changed since the newest version tag, and
+  skip docs-, test- or workflow-only changes. A commit since that tag with a
+  `type!:` subject or `BREAKING CHANGE:` footer fails the run instead of being
+  released as a patch. `AUTO_RELEASE_PRERELEASE` (default `true`) selects the
+  prerelease setting. Set `AUTO_RELEASE` to anything else to stop unattended
+  releases.
+- **Manual releases** use `workflow_dispatch` from `main` with `bump`
+  (`patch`, `minor` or `major`; default `minor`), `prerelease` (default `true`)
+  and `dry_run` (default `true`). Use them for minor and major versions.
+
+The verify job refuses other dispatch refs and stable releases while
+`dist/bundled-dependencies.json` lists `missing-license-text` entries. It then
+requires a successful `Model-free CI` push run on the exact `main` commit and
+reruns `pnpm check` with a clean-tree check. If CI has not yet succeeded on the
+head, an automatic run skips; that CI run's completion triggers the next check.
+The publish job runs in the `release` environment, creates an annotated version
+tag on that commit, publishes the GitHub Release with generated notes, advances the matching
+major alias (`v0` for 0.x, `v1` for 1.x) only when the release is the newest of its
+major line, and verifies that each written tag resolves to the verified commit.
+No version bump commit is needed; `package.json` stays at `0.0.0`. Restrict the
+`release` environment's deployment branches to `main`; the publish job fails
+before any write when the environment has no branch restriction. It does not
+require reviewers, so releases complete without manual approval.
+If publication fails partway, use **Re-run failed jobs** on the same run. It
+resumes only when an existing version tag already points to the verified commit
+and any existing GitHub Release is published with the requested prerelease
+setting. It rejects the retry if version tags changed after verification would
+alter the alias or latest decision; the next automatic check or a new dispatch
+replans in that case.
+GitHub Release is marked latest only for a stable release newer than every
+existing version tag.
+
+Keep published version tags unchanged. Consumers that pin full commit SHAs
+update their pins after release. Action release versions are independent of the selected Vally version.
+
+The moving `v0` tag points to the latest 0.x release. The workflow
+never moves version-specific tags or publishes a separate GitHub release for the
+moving tag; it force-updates only the matching major alias. Keep `v0` on the 0.x
+line when introducing a future `v1` release.
 
 Before proposing a release, verify supported CLI versions and their native
 evidence contracts, run the Linux model-free controls, and qualify the optional
