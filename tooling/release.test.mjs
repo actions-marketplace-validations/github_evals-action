@@ -5,7 +5,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { nextVersion, parseVersion, planAutomatic, planRelease, recheckPlan } from './release.mjs';
+import { isAncestor, nextVersion, parseVersion, planAutomatic, planRelease, recheckPlan } from './release.mjs';
+
+test('isAncestor treats only git exit 1 as "not an ancestor" and rethrows git errors', () => {
+  const exit = (status) => () => {
+    throw Object.assign(new Error('git failed'), { status });
+  };
+  assert.equal(isAncestor('v0.2.0', 'HEAD', () => ''), true);
+  assert.equal(isAncestor('v0.2.0', 'HEAD', exit(1)), false);
+  const gitError = Object.assign(new Error('git failed'), { status: 128, stderr: 'fatal: bad object' });
+  assert.throws(() => isAncestor('v0.2.0', 'HEAD', () => { throw gitError; }), /fatal: bad object/);
+});
 
 test('accepts only plain vMAJOR.MINOR.PATCH release tags', () => {
   assert.deepEqual(parseVersion('v0.3.0'), [0, 3, 0]);
@@ -47,6 +57,12 @@ test('rechecks retried publications against current tags', () => {
   const base = { version: 'v0.3.0', prerelease: false, missingLicenseText: 0, moveAlias: true, latest: true };
   assert.equal(recheckPlan({ ...base, tags: ['v0', 'v0.2.0', 'v0.3.0'] }).moveAlias, true);
   assert.throws(() => recheckPlan({ ...base, tags: ['v0', 'v0.2.0', 'v0.3.0', 'v0.4.0'] }), /stale/);
+  assert.throws(() => recheckPlan({ ...base, tags: ['v0.2.0', 'v1.0.0'] }), /stale/);
+});
+
+test('rejects prerelease plans when a higher-major tag appeared after verification', () => {
+  const base = { version: 'v0.3.0', prerelease: true, missingLicenseText: 0, moveAlias: true, latest: false };
+  assert.equal(recheckPlan({ ...base, tags: ['v0.2.0'] }).tag, 'v0.3.0');
   assert.throws(() => recheckPlan({ ...base, tags: ['v0.2.0', 'v1.0.0'] }), /stale/);
 });
 
@@ -101,4 +117,42 @@ test('plan releases a patch when a shipped file moves out of a shipped path', (t
   const output = execFileSync(process.execPath, [fileURLToPath(new URL('./release.mjs', import.meta.url)), 'plan', 'patch', 'false', 'true'], { cwd: repo, encoding: 'utf8', env: { ...process.env, GITHUB_OUTPUT: '' } });
   assert.match(output, /^release=true$/m);
   assert.match(output, /^tag=v0\.1\.1$/m);
+});
+
+test('CLI rejects diverged tags and skips a HEAD behind the latest release', (t) => {
+  const repo = mkdtempSync(join(tmpdir(), 'release-plan-'));
+  t.after(() => rmSync(repo, { recursive: true, force: true }));
+  const git = (...args) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'commit.gpgsign=false', '-c', 'tag.gpgsign=false', ...args], { cwd: repo, encoding: 'utf8' });
+  mkdirSync(join(repo, 'src'));
+  mkdirSync(join(repo, 'dist'));
+  writeFileSync(join(repo, 'src', 'index.js'), 'export const value = 1;\n');
+  writeFileSync(join(repo, 'dist', 'bundled-dependencies.json'), '[]\n');
+  git('init', '-q');
+  git('add', '.');
+  git('commit', '-q', '-m', 'feat: initial');
+  git('branch', '-M', 'main');
+  git('tag', 'v0.2.0');
+
+  writeFileSync(join(repo, 'src', 'index.js'), 'export const value = 2;\n');
+  git('commit', '-q', '-am', 'fix: main change');
+  git('checkout', '-b', 'release-line', 'v0.2.0');
+  writeFileSync(join(repo, 'src', 'index.js'), 'export const value = 3;\n');
+  git('commit', '-q', '-am', 'fix: release change');
+  git('tag', 'v0.2.1');
+  git('checkout', 'main');
+
+  const plan = () => execFileSync(process.execPath, [fileURLToPath(new URL('./release.mjs', import.meta.url)), 'plan', 'patch', 'true', 'true'], {
+    cwd: repo,
+    encoding: 'utf8',
+    env: { ...process.env, GITHUB_OUTPUT: '' },
+  });
+  assert.throws(() => plan(), (error) => {
+    assert.match(error.stderr.toString(), /v0\.2\.1 and this commit have diverged/);
+    return true;
+  });
+
+  git('checkout', '--detach', 'v0.2.0');
+  const output = plan();
+  assert.match(output, /^release=false$/m);
+  assert.match(output, /v0\.2\.1 is not an ancestor/);
 });

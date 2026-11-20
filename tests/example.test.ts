@@ -200,10 +200,17 @@ describe('release workflow contract', () => {
     expect(pinned[1]).toMatch(/^actions\/setup-node@[0-9a-f]{40}$/);
     expect(publish.steps.find((step) => step.uses === 'actions/checkout@v7')!.with).toMatchObject({ 'persist-credentials': false });
     const publishRuns = publish.steps.map((step) => step.run ?? '');
-    const branchPolicy = publishRuns.findIndex((run) => run.includes('.deployment_branch_policy != null'));
+    const branchPolicy = publishRuns.findIndex((run) => run.includes('deployment-branch-policies') && run.includes('"false true"') && run.includes('"branch:main"'));
     const recheck = publishRuns.findIndex((run) => run.includes('tooling/release.mjs recheck'));
     const firstWrite = publishRuns.findIndex((run) => run.includes('git/tags'));
     expect(branchPolicy).toBe(0);
+    const releaseGate = publishRuns[branchPolicy]!;
+    const policyGuard = releaseGate.indexOf('if [ "$policy" != "false true" ]');
+    const branchPolicyLookup = releaseGate.indexOf('deployment-branch-policies');
+    expect(policyGuard).toBeGreaterThanOrEqual(0);
+    expect(policyGuard).toBeLessThan(branchPolicyLookup);
+    expect(releaseGate).not.toContain('.type // "branch"');
+    expect(releaseGate).toContain('if [ "$branches" != "branch:main" ]');
     expect(recheck).toBeGreaterThan(branchPolicy);
     expect(recheck).toBeLessThan(firstWrite);
     const script = publishRuns.join('\n');

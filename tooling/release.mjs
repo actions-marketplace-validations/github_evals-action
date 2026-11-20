@@ -59,8 +59,11 @@ export function planAutomatic({ tags, latestIsAncestor, changedFiles, messages }
 
 // A retried publish job reuses verify outputs; reject them if newer tags appeared since verification.
 export function recheckPlan({ version, prerelease, tags, missingLicenseText, moveAlias, latest }) {
-  const plan = planRelease({ version, prerelease, tags: tags.filter((tag) => tag !== version), missingLicenseText });
-  if (plan.moveAlias !== moveAlias || plan.latest !== latest) {
+  const currentTags = tags.filter((tag) => tag !== version);
+  const plan = planRelease({ version, prerelease, tags: currentTags, missingLicenseText });
+  const newest = newestVersion(currentTags);
+  if ((newest && compare(parseVersion(newest), parseVersion(version)) >= 0) ||
+      plan.moveAlias !== moveAlias || plan.latest !== latest) {
     throw new Error(`Release plan for ${version} is stale: version tags changed after verification. Dispatch a new release run.`);
   }
   return plan;
@@ -75,14 +78,25 @@ function git(...args) {
   return execFileSync('git', args, { encoding: 'utf8' });
 }
 
+// `git merge-base --is-ancestor` exits 1 for "no"; any other failure is a git error.
+export function isAncestor(ancestor, descendant, run = execFileSync) {
+  try {
+    run('git', ['merge-base', '--is-ancestor', ancestor, descendant], { encoding: 'utf8' });
+    return true;
+  } catch (error) {
+    if (error.status === 1) return false;
+    const stderr = error.stderr?.toString().trim();
+    if (stderr) throw new Error(`${error.message}\n${stderr}`, { cause: error });
+    throw error;
+  }
+}
+
 function automaticInput(tags) {
   const latest = newestVersion(tags);
   if (!latest) return { tags, latestIsAncestor: true, changedFiles: git('ls-files').split('\n').filter(Boolean), messages: [] };
-  let latestIsAncestor = true;
-  try {
-    execFileSync('git', ['merge-base', '--is-ancestor', latest, 'HEAD']);
-  } catch {
-    latestIsAncestor = false;
+  const latestIsAncestor = isAncestor(latest, 'HEAD');
+  if (!latestIsAncestor && !isAncestor('HEAD', latest)) {
+    throw new Error(`${latest} and this commit have diverged; dispatch a manual release from main to supersede it; do not move published version tags.`);
   }
   return {
     tags,

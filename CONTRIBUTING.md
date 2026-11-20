@@ -112,9 +112,11 @@ The [`Release` workflow](.github/workflows/release.yml) publishes the current
   when `src/`, `dist/` or `action.yml` changed since the newest version tag, and
   skip docs-, test- or workflow-only changes. A commit since that tag with a
   `type!:` subject or `BREAKING CHANGE:` footer fails the run instead of being
-  released as a patch. `AUTO_RELEASE_PRERELEASE` (default `true`) selects the
-  prerelease setting. Set `AUTO_RELEASE` to anything else to stop unattended
-  releases.
+  released as a patch. If the newest version tag is not in `main`'s history,
+  automatic runs fail; dispatch a manual release from `main` to supersede it
+  instead of moving the published tag. `AUTO_RELEASE_PRERELEASE` (default
+  `true`) selects the prerelease setting. Set `AUTO_RELEASE` to anything else
+  to stop unattended releases.
 - **Manual releases** use `workflow_dispatch` from `main` with `bump`
   (`patch`, `minor` or `major`; default `minor`), `prerelease` (default `true`)
   and `dry_run` (default `true`). Use them for minor and major versions.
@@ -128,16 +130,18 @@ The publish job runs in the `release` environment, creates an annotated version
 tag on that commit, publishes the GitHub Release with generated notes, advances the matching
 major alias (`v0` for 0.x, `v1` for 1.x) only when the release is the newest of its
 major line, and verifies that each written tag resolves to the verified commit.
-No version bump commit is needed; `package.json` stays at `0.0.0`. Restrict the
-`release` environment's deployment branches to `main`; the publish job fails
-before any write when the environment has no branch restriction. It does not
+No version bump commit is needed; `package.json` stays at `0.0.0`. Set the
+`release` environment's deployment branches to **Selected branches and tags**
+with the single branch rule `main`; the publish job fails before any write
+otherwise (including **Protected branches only**). It does not
 require reviewers, so releases complete without manual approval.
 If publication fails partway, use **Re-run failed jobs** on the same run. It
 resumes only when an existing version tag already points to the verified commit
 and any existing GitHub Release is published with the requested prerelease
-setting. It rejects the retry if version tags changed after verification would
-alter the alias or latest decision; the next automatic check or a new dispatch
-replans in that case.
+setting. It rejects the retry if a version tag at or above the planned version
+appeared after verification, or if changed version tags would alter the alias
+or latest decision; the next automatic check or a new dispatch replans in that
+case.
 GitHub Release is marked latest only for a stable release newer than every
 existing version tag.
 
